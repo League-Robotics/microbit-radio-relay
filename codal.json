@@ -7,6 +7,7 @@
     },
     "config":{
         "MICROBIT_BLE_ENABLED" : 0,
-        "MICROBIT_BLE_PAIRING_MODE": 0
+        "MICROBIT_BLE_PAIRING_MODE": 0,
+        "MICROBIT_RADIO_MAX_PACKET_SIZE": 250
     }
 }

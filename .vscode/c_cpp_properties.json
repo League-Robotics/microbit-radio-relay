@@ -1,16 +1,34 @@
 {
     "configurations": [
         {
-            "name": "Linux",
+            "name": "codal",
             "includePath": [
                 "${workspaceFolder}/source/**",
                 "${workspaceFolder}/libraries/**",
                 "${workspaceFolder}/utils/cmake/**",
                 "${workspaceFolder}/build/libraries/**"
             ],
-            "defines": [],
-            "compilerPath": "/usr/bin/arm-none-eabi-g++",
-            "compilerArgs": ["-DNRF52833_XXAA"],
+            "defines": [
+                "NDEBUG",
+                "APP_TIMER_V2",
+                "APP_TIMER_V2_RTC1_ENABLED",
+                "NRF_DFU_TRANSPORT_BLE=1",
+                "NRF52833_XXAA",
+                "NRF52833",
+                "TARGET_MCU_NRF52833",
+                "NRF5",
+                "__CORTEX_M4",
+                "S113",
+                "TOOLCHAIN_GCC",
+                "__START=target_start",
+                "__STATIC_INLINE=static inline",
+                "__STATIC_FORCEINLINE=static inline",
+                "__INLINE=inline",
+                "__FORCEINLINE=inline",
+                "NRF_STATIC_INLINE=static inline",
+                "NRFX_STATIC_INLINE=static inline"
+            ],
+            "compilerPath": "arm-none-eabi-g++",
             "cStandard": "c11",
             "cppStandard": "c++11",
             "intelliSenseMode": "gcc-arm"

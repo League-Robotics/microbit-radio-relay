@@ -104,6 +104,11 @@ set(CMAKE_TOOLCHAIN_FILE "${TOOLCHAIN_FOLDER}/toolchain.cmake" CACHE PATH "toolc
 project(codal)
 enable_language(ASM)
 
+# Export compile_commands.json so editors (e.g. VS Code C/C++ extension) get the
+# exact per-file flags, defines, and include paths. Portable across OSes; avoids
+# hardcoding an OS-specific compilerPath in .vscode/c_cpp_properties.json.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # include compiler flags overrides
 include(${TOOLCHAIN_FOLDER}/compiler-flags.cmake)
 set(PLATFORM_INCLUDES_PATH "${PROJECT_SOURCE_DIR}/utils/cmake/toolchains/${device.toolchain}")
