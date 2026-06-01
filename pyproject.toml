@@ -5,6 +5,7 @@ description = "Utility scripts for building and deploying microbit-v2-samples"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "pyserial>=3.5",
     "python-dotenv>=1.0.1",
     "requests>=2.32.3",
 ]

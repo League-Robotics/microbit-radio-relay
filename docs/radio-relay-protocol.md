@@ -18,13 +18,19 @@ It supports two radio framing modes:
   robot receives them on `on received string` with no custom code. The relay
   constructs the full CODAL header itself, so any dumb serial client (a bash
   `echo`, `cat`, a Python script) can drive it.
-- **RAW251** — emits headerless payloads up to 251 bytes to a peer running
+- **RAW250** — emits headerless payloads up to 250 bytes to a peer running
   C++/CODAL or MicroPython configured with the matching packet size. No CODAL
   header; the relay passes payload through to the framing layer directly.
 
-The firmware is always compiled with `MICROBIT_RADIO_MAX_PACKET_SIZE = 251`.
-MAKECODE mode constrains the payload to the 32-byte CODAL layout at runtime; it
-does not require a separate build.
+The firmware is compiled with `MICROBIT_RADIO_MAX_PACKET_SIZE = 250` (set in
+`codal.json`). This is the radio packet size and the value the mode name tracks;
+CODAL caps it at 250, and **both ends must be built with the same value** or the
+larger packets are dropped on receive. MAKECODE mode constrains the payload to
+the 32-byte CODAL layout at runtime; it does not require a separate build.
+
+> **Naming:** earlier drafts called this mode RAW251 (after a theoretical
+> 254 − 3 PHY ceiling). The configurable CODAL value is 250, so the mode is now
+> **RAW250**; `!MODE RAW251` is accepted as a backward-compatible alias.
 
 ### Out of scope
 
@@ -46,7 +52,7 @@ the **data plane**.
 ```
 host opens serial port
   -> relay resets, boots into COMMAND plane, emits DEVICE banner
-host queries/configures: ?, !MODE RAW251, !CG 5 42, !P 6
+host queries/configures: ?, !MODE RAW250, !CG 5 42, !P 6
 host sends !GO
   -> relay configures radio (disable/reconfigure/re-enable), enters DATA plane
 DATA plane: bytes are transparent payload, framed + chunked to radio, both ways
@@ -57,10 +63,11 @@ There is no in-band escape sequence (no `+++`, no guard timing). The only way
 out of the data plane is a reset, i.e. close and reopen the port. This is what
 keeps the data plane fully transparent — no byte in the stream is reserved.
 
-> **Open decision:** confirm DTR-on-open actually resets the nRF on your
-> interface-chip build. If it does not, fall back to firmware soft-reset on
-> DTR-drop (`machine.reset()` equivalent in CODAL). Test by watching for the
-> boot banner after opening the port.
+> **Resolved (verified on hardware):** closing **and reopening** the port resets
+> the board to the command plane. An in-place DTR toggle on an already-open port
+> does *not* reset, so the host must fully close and reopen. After reopen, send
+> `HELLO` and wait for the banner to confirm the command plane (the boot banner
+> emitted during the closed window is missed). See `scripts/relay_test.py`.
 
 ---
 
@@ -92,7 +99,7 @@ the data plane after `!GO`, with no prefix.
 | `!RC <ch> <group>` | Alias of `!CG`.                                                   |
 | `!P <0-7>`         | Set transmit power.                                               |
 | `!MODE MAKECODE`   | Select 32-byte CODAL framing (default).                           |
-| `!MODE RAW251`     | Select headerless ≤251-byte framing.                              |
+| `!MODE RAW250`     | Select headerless ≤250-byte framing. (`RAW251` accepted as alias.) |
 | `!FRAG ON\|OFF`     | MAKECODE over-length policy: fragment vs. truncate (default OFF). |
 | `!GO`              | Leave command plane, enter data plane. Exit only via reset.       |
 | `!HELP`            | Print protocol summary.                                           |
@@ -103,7 +110,7 @@ the data plane after `!GO`, with no prefix.
 | Query     | Response (relay -> host, `#`-prefixed)                |
 | --------- | ----------------------------------------------------- |
 | `?`       | `# channel: <ch> group: <g> mode: <m> power: <p>`     |
-| `!MODE?`  | `# mode: MAKECODE` or `# mode: RAW251`                |
+| `!MODE?`  | `# mode: MAKECODE` or `# mode: RAW250`                |
 
 Query support matters because the host cannot see relay state across a reset.
 After opening the port the host should read back config rather than assume.
@@ -115,6 +122,23 @@ DEVICE:RADIOBRIDGE:relay:<deviceName>:<serialNumber>
 ```
 
 Emitted on boot and on `HELLO`.
+
+### 3.5 Buttons
+
+Buttons change the radio channel without a host, in either plane:
+
+- **A** — channel down, **B** — channel up, wrapping within 0–35.
+- Active only when `group == 10` (a custom-group link is left undisturbed).
+- The new channel is applied immediately, shown on the display with the same
+  glyph mapping as `!C` (0–9 → `0`–`9`, 10–35 → `A`–`Z`), and echoed to the host
+  as `# channel: <ch> group: 10`.
+
+### 3.6 Defaults
+
+On boot the relay starts on **channel 10 (`A`), group 10, power 7, mode
+MAKECODE**. Channel A (not 0) is the default on purpose, so this firmware does
+not collide with older relays that boot on channel 0. The boot display shows the
+channel glyph (`A`).
 
 ---
 
@@ -158,12 +182,12 @@ your own firmware.
 > the 8 timestamp+serial bytes are free for your own use. In strict
 > MAKECODE-compat they stay conventional so nothing downstream chokes.
 
-### 4.2 RAW251 mode (headerless, ≤251 bytes)
+### 4.2 RAW250 mode (headerless, ≤250 bytes)
 
 No CODAL header. The payload handed to the radio is whatever the framing layer
-(§5) produces, up to 251 bytes — the hardware ceiling (254 − 3 for S0/LENGTH/S1).
-Peer must be C++/CODAL or MicroPython with matching packet size. A stock
-MakeCode robot cannot participate in this mode.
+(§5) produces, up to 250 bytes — `MICROBIT_RADIO_MAX_PACKET_SIZE`, which CODAL
+caps at 250. Peer must be C++/CODAL or MicroPython with matching packet size. A
+stock MakeCode robot cannot participate in this mode.
 
 ---
 
@@ -193,8 +217,8 @@ constant differs.
 
 | Mode     | Radio payload | Frame header | Usable payload `n` |
 | -------- | ------------- | ------------ | ------------------ |
-| MAKECODE | 19 (in CODAL) | 3            | ~16                |
-| RAW251   | 251           | 3            | ~248               |
+| MAKECODE | 19 (in CODAL) | 3            | 16                 |
+| RAW250   | 250           | 3            | 247                |
 
 In MAKECODE mode the frame header lives *inside* the 19 CODAL string bytes, so a
 fragmented stream is only decodable by your own firmware, not a stock robot.
@@ -208,12 +232,15 @@ fire-and-forget (e.g. driving a stock MakeCode robot), leave `ACK_REQ` clear.
 
 ---
 
-## 6. Open decisions to close before implementation
+## 6. Open decisions — status
 
-1. **DTR reset behavior** — confirm port-open resets the nRF on your build, else
-   add firmware soft-reset on DTR-drop. (§2)
-2. **MAKECODE over-length** — confirm truncate-by-default is desired, with
-   `!FRAG` as the opt-in. (§4.1)
-3. **Line terminator** — spec assumes `\n` cuts a MAKECODE packet. Confirm. (§4.1)
-4. **SEQ width** — 1 byte (wraps at 256) assumed sufficient for stop-and-wait;
-   revisit if windowing is added. (§5.1)
+1. **DTR reset behavior** — *Resolved.* Close **and reopen** the port to reset to
+   the command plane; an in-place DTR toggle does not. (§2)
+2. **MAKECODE over-length** — *Implemented as truncate-by-default*, `!FRAG ON` to
+   fragment. (§4.1)
+3. **Line terminator** — *Implemented:* `\n` cuts a MAKECODE packet; `\r` ignored. (§4.1)
+4. **SEQ width** — 1 byte (wraps at 256), sufficient for the current
+   fire-and-forget / stop-and-wait; revisit if windowing is added. (§5.1)
+5. **Radio packet size** — *Resolved:* `MICROBIT_RADIO_MAX_PACKET_SIZE = 250`
+   (RAW250); both ends must match. Reliability is currently fire-and-forget; the
+   `ACK_REQ`/`ACK` responder is wired, stop-and-wait sender is the next step. (§4.2/§5.3)

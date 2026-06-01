@@ -30,7 +30,7 @@ SOFTWARE.
 // Implements the host<->radio bridge described in docs/radio-relay-protocol.md:
 // a line-oriented command plane for configuration, then a transparent data
 // plane (entered with !GO, left only by reset) that frames serial bytes onto
-// the nRF radio and back in either MAKECODE or RAW251 framing.
+// the nRF radio and back in either MAKECODE or RAW250 framing.
 //
 // Never returns; the only way out of the data plane is a device reset (host
 // closing/reopening the serial port).
