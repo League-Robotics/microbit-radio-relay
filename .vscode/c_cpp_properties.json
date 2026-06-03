@@ -28,6 +28,7 @@
                 "NRF_STATIC_INLINE=static inline",
                 "NRFX_STATIC_INLINE=static inline"
             ],
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json",
             "compilerPath": "arm-none-eabi-g++",
             "cStandard": "c11",
             "cppStandard": "c++11",

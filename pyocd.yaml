@@ -1,0 +1,5 @@
+# pyocd session options, picked up by `pyocd flash` (which mbdeploy invokes).
+# Force a full chip/mass erase: sector erase fails on the nRF52833's
+# MBR/SoftDevice region at 0x0 (and clears APPROTECT if the part is locked),
+# which is what blocked `mbdeploy deploy`.
+chip_erase: chip

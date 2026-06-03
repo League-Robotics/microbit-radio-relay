@@ -1,0 +1,12 @@
+{
+  "990636020005282017449eac613c0332000000006e052820": {
+    "announcement": "DEVICE:RADIORELAY:relay:getez:6a5d86c0",
+    "common_name": "relay",
+    "device_name": "getez",
+    "enum": 1,
+    "port": "/dev/cu.usbmodem2142202",
+    "role": "RADIORELAY",
+    "serial": "6a5d86c0",
+    "uid": "990636020005282017449eac613c0332000000006e052820"
+  }
+}
