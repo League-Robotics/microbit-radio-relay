@@ -1,48 +1,121 @@
-# microbit-v2-samples
+# micro:bit Radio Relay
 
-[![Native Build Status](https://github.com/lancaster-university/microbit-v2-samples/actions/workflows/build.yml/badge.svg)](https://github.com/lancaster-university/microbit-v2-samples/actions/workflows/build.yml) [![Docker Build Status](https://github.com/lancaster-university/microbit-v2-samples/actions/workflows/docker-image.yml/badge.svg)](https://github.com/lancaster-university/microbit-v2-samples/actions/workflows/docker-image.yml)
+Firmware that turns a **micro:bit V2** into a **USB-serial ↔ nRF radio bridge**.
+A host (any program that can open a serial port — `cat`, `echo`, a `pyserial`
+script, a serial terminal) talks to the relay over USB at **115200 baud**; the
+relay forwards bytes to and from the 2.4 GHz micro:bit radio. It needs no host
+library and no custom code on the receiving robot.
 
-This repository provides the necessary tooling to compile a C/C++ CODAL program for the micro:bit V2 and generate a HEX file that can be downloaded to the device.
+It is built on the [lancaster-university/microbit-v2-samples](https://github.com/lancaster-university/microbit-v2-samples)
+CODAL build system (toolchain/build/deploy instructions below are inherited from
+it). The relay firmware itself lives in [`source/relay/`](source/relay/) and is
+launched from [`source/main.cpp`](source/main.cpp).
 
-## Raising Issues
-Any issues regarding the micro:bit are gathered on the [lancaster-university/codal-microbit-v2](https://github.com/lancaster-university/codal-microbit-v2) repository. Please raise yours there too.
+## What it does
 
-# Installation
-You need some open source pre-requisites to build this repo. You can either install these tools yourself, or use the docker image provided below.
+- **Two framing modes**, switchable at runtime (one firmware does both):
+  - **RAW250** *(default)* — headerless payloads up to 250 bytes to a peer
+    running matching C++/CODAL or MicroPython firmware.
+  - **MAKECODE** — 32-byte CODAL string packets, so a **stock MakeCode robot**
+    receives them on `on received string` with no custom code.
+- **Command plane → data plane lifecycle.** On boot the relay is in a
+  line-oriented **command plane** for configuration; `!GO` switches it to a
+  fully transparent **data plane**. The radio is live in both.
+- **Config persists to flash.** Channel, group, power, mode, fragmentation, and
+  echo survive reset *and* power-cycle. Configure a board once and replug it.
+- **Standalone operation.** Buttons set the channel (A/B) and toggle mode/echo
+  (A+B menu) with no host attached. **Echo/transponder mode** turns a board into
+  a self-contained radio echo server.
+
+## Protocol — start here
+
+**[`docs/radio-relay-protocol.md`](docs/radio-relay-protocol.md)** is the full
+wire/grammar specification and the canonical reference;
+**[`docs/announce.md`](docs/announce.md)** specifies the device announcement/banner
+line. Quick taste (115200 baud):
+
+```
+# Open the port (this resets the board). It prints its banner:
+#   DEVICE:RADIOBRIDGE:relay:<name>:<serial>
+HELLO            # re-request the banner if you missed it
+?                # show: # channel: <ch> group: <g> mode: <m> power: <p>
+!C 5             # set channel 5 (group 10)
+!MODE RAW250     # default; or !MODE MAKECODE to talk to a stock MakeCode robot
+!GO              # enter the transparent data plane
+...bytes...      # everything after !GO is radio payload, both directions
+# close + reopen the port to return to the command plane (config is kept)
+```
+
+Defaults on a fresh board: **channel 0, group 10, power 7, mode RAW250, echo off**.
+Command summary (`!HELP` prints this on the device):
+
+| Command | Effect |
+| --- | --- |
+| `!C <0-35>` | set channel, group 10 |
+| `!CG <ch> <group>` / `!RC ...` | set channel (0–83) and group (0–255) |
+| `!P <0-7>` | transmit power |
+| `!MODE MAKECODE` / `!MODE RAW250` | select framing (`RAW251` = alias of RAW250) |
+| `!FRAG ON\|OFF` | MAKECODE over-length: fragment vs. truncate |
+| `!ECHO [ON\|OFF]` | transponder: bounce received messages back |
+| `!DEFAULTS` | clear saved config (defaults next reset) |
+| `!GO` | enter data plane (exit only by reset) |
+| `?` / `!MODE?` | query config / mode |
+| `HELLO` | re-print the device banner |
+| buttons A / B | channel down / up (group 10) |
+| buttons A+B | menu: packet mode 32/250, echo, cancel |
+
+> **Both ends must share the radio packet size.** The firmware is built with
+> `MICROBIT_RADIO_MAX_PACKET_SIZE = 250` ([`codal.json`](codal.json)); a peer
+> built with a different size will not receive the larger packets.
+
+## Test harness
+
+Two relay boards on USB:
+
+```
+uv run python3 scripts/relay_test.py                  # all phases
+uv run python3 scripts/relay_test.py --phase throughput --mode RAW250
+```
+
+It auto-discovers boards by their banner, then exercises reset, messaging,
+channel isolation, round-trip, and throughput. The other `scripts/*_test.py`
+files drive a single host board against standalone echo/MAKECODE peers.
+
+---
+
+# Building and deploying
+
+## Prerequisites
 
 - [GNU Arm Embedded Toolchain](https://developer.arm.com/tools-and-software/open-source-software/developer-tools/gnu-toolchain/gnu-rm/downloads)
-- [Git](https://git-scm.com)
-- [CMake](https://cmake.org/download/)
-- [Python 3](https://www.python.org/downloads/)
+- [Git](https://git-scm.com), [CMake](https://cmake.org/download/), [Python 3](https://www.python.org/downloads/)
 
-We use Ubuntu Linux for most of our tests. You can also install these tools easily through the package manager:
+On Ubuntu:
 
 ```
-    sudo apt install gcc
-    sudo apt install git
-    sudo apt install cmake
-    sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi
+sudo apt install gcc git cmake gcc-arm-none-eabi binutils-arm-none-eabi
 ```
 
-## macOS clean setup (recommended)
+### macOS clean setup (recommended)
 
 Use these exact commands to avoid mixed/incomplete ARM toolchains:
 
 ```
-    brew uninstall arm-none-eabi-gcc arm-none-eabi-binutils
-    brew install --cask gcc-arm-embedded
-    brew install uv
+brew uninstall arm-none-eabi-gcc arm-none-eabi-binutils
+brew install --cask gcc-arm-embedded
+brew install uv
 ```
 
-If `arm-none-eabi-gcc` is not found after installation, add links once:
+If `arm-none-eabi-gcc` is not found after installation, link the tools once
+(adjust the version path to your install) — or run `just link-arm-tools`:
 
 ```
-    ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-gcc /opt/homebrew/bin/arm-none-eabi-gcc
-    ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-g++ /opt/homebrew/bin/arm-none-eabi-g++
-    ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-ar /opt/homebrew/bin/arm-none-eabi-ar
-    ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-ranlib /opt/homebrew/bin/arm-none-eabi-ranlib
-    ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-objcopy /opt/homebrew/bin/arm-none-eabi-objcopy
-    ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-size /opt/homebrew/bin/arm-none-eabi-size
+ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-gcc    /opt/homebrew/bin/arm-none-eabi-gcc
+ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-g++    /opt/homebrew/bin/arm-none-eabi-g++
+ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-ar     /opt/homebrew/bin/arm-none-eabi-ar
+ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-ranlib /opt/homebrew/bin/arm-none-eabi-ranlib
+ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-objcopy /opt/homebrew/bin/arm-none-eabi-objcopy
+ln -s /Applications/ArmGNUToolchain/15.2.rel1/arm-none-eabi/bin/arm-none-eabi-size   /opt/homebrew/bin/arm-none-eabi-size
 ```
 
 ## Python + UV setup
@@ -50,111 +123,67 @@ If `arm-none-eabi-gcc` is not found after installation, add links once:
 From the repository root:
 
 ```
-    uv venv
-    uv sync
+uv venv
+uv sync
 ```
 
-UV commands used in this project:
+This installs the Python modules used by the deploy/test scripts (`requests`,
+`python-dotenv`, `pyserial`).
+
+## Build
 
 ```
-    uv add requests python-dotenv
-    uv sync
-    uv run python3 build.py
-    uv run python3 scripts/build_and_deploy.py --clean
+uv run python3 build.py            # produces ./MICROBIT.hex
+uv run python3 build.py --clean    # clean rebuild
 ```
 
-This installs Python modules used by deploy scripts:
+## Deploy
 
-- `requests`
-- `python-dotenv`
-
-## Just recipes
-
-The repository includes a `justfile` to run common setup/build/deploy workflows.
+`scripts/deploy.py` flashes the hex to a local USB-mounted micro:bit, or POSTs it
+to a console (`CONSOLE_URL` + `CONSOLE_KEY`, via `.env` or flags):
 
 ```
-    just --list
-    just uv-sync
-    just build
-    just build-clean
-    just deploy -- --usb-mount /Volumes/MICROBIT
-    just build-deploy -- --clean
+uv run python3 scripts/build_and_deploy.py --clean              # build then deploy
+uv run python3 scripts/deploy.py                                # deploy existing hex
+uv run python3 scripts/deploy.py --usb-mount /Volumes/MICROBIT  # explicit USB mount
+uv run python3 scripts/build_and_deploy.py --console-url https://your-console.example --console-key YOUR_KEY
 ```
 
-## Yotta
-For backwards compatibility with [microbit-samples](https://github.com/lancaster-university/microbit-samples) users, we also provide a yotta target for this repository.
+> **Flashing a USB-mounted micro:bit:** copy the hex with `cat`, not `cp`, onto
+> the `MICROBIT` volume — some macOS setups mishandle the MSD copy otherwise.
+
+## `just` recipes
+
+A [`justfile`](justfile) wraps the common workflows:
+
+```
+just --list
+just uv-sync
+just build            # / just build-clean
+just deploy -- --usb-mount /Volumes/MICROBIT
+just build-deploy -- --clean
+just setup-macos      # / just link-arm-tools
+```
 
 ## Docker
-You can use the [Dockerfile](https://github.com/lancaster-university/microbit-v2-samples/blob/master/Dockerfile) provided to build the samples, or your own project sources, without installing additional dependencies.
 
-Run the following command to build the image locally; the .bin and .hex files from a successful compile will be placed in a new `out/` directory:
-
-```
-    docker build -t microbit-tools --output out .
-```
-
-To omit the final output stage (for CI, for example) run without the `--output` arguments:
+Build without installing the toolchain (hex/bin land in `out/`):
 
 ```
-    docker build -t microbit-tools .
+docker build -t microbit-tools --output out .
 ```
 
-# Building
-- Clone this repository
-- In the root of this repository type `uv run python3 build.py`
-- The hex file will be built `MICROBIT.hex` and placed in the root folder.
+## Debugging
 
-## Build + deploy scripts
+VS Code launch configs for OpenOCD and PyOCD are provided (install the
+[`marus25.cortex-debug`](https://marketplace.visualstudio.com/items?itemName=marus25.cortex-debug)
+extension, build, then Run and Debug). On the relay itself, `!DEBUG ON` turns on
+`# DBG ...` radio TX/RX logging over serial without a reflash, and `!REGS` dumps
+the live nRF radio registers (see the protocol doc §3.2).
 
-The project includes Python scripts in `scripts/`:
+## Compatibility & issues
 
-- `scripts/build.py`: wrapper around repository `build.py`
-- `scripts/deploy.py`: deploys hex to console (`CONSOLE_URL` + `CONSOLE_KEY`) or local USB mount
-- `scripts/build_and_deploy.py`: runs build then deploy
-
-Examples:
-
-```
-    uv run python3 scripts/build.py --clean
-    uv run python3 scripts/deploy.py
-    uv run python3 scripts/build_and_deploy.py --clean
-```
-
-Console deploy with explicit arguments:
-
-```
-    uv run python3 scripts/build_and_deploy.py --console-url https://your-console.example --console-key YOUR_KEY
-```
-
-USB deploy uses `/Volumes/MICROBIT` by default. Override with:
-
-```
-    uv run python3 scripts/deploy.py --usb-mount /Volumes/YOUR_DEVICE
-```
-
-# Developing
-You will find a simple main.cpp in the `source` folder which you can edit. CODAL will also compile any other C/C++ header files our source files with the extension `.h .c .cpp` it finds in the source folder.
-
-The `samples` folder contains a number of simple sample programs that utilise you may find useful.
-
-## Developer codal.json
-
-There is an example `coda.dev.json` file which enables "developer builds" (clones dependencies from the latest commits, instead of the commits locked in the `codal-microbit-v2` tag), and adds extra CODAL flags that enable debug data to be printed to serial.
-To use it, simply copy the additional json entries into your `codal.json` file, or you can replace the file completely (`mv coda.dev.json codal.json`).
-
-# Debugging
-If you are using Visual Studio Code, there is a working debugging environment already set up for you, allowing you to set breakpoints and observe the micro:bit's memory. To get it working, follow these steps:
-
-1. Install either [OpenOCD](http://openocd.org) or [PyOCD](https://github.com/pyocd/pyOCD).
-2. Install the [`marus25.cortex-debug` VS Code extension](https://marketplace.visualstudio.com/items?itemName=marus25.cortex-debug).
-3. Build your program.
-4. Click the Run and Debug option in the toolbar.
-5. Two debugging options are provided: one for OpenOCD, and one for PyOCD. Select the correct one depending on the debugger you installed.
-
-This should launch the debugging environment for you. To set breakpoints, you can click to the left of the line number of where you want to stop.
-
-# Compatibility
-This repository is designed to follow the principles and APIs developed for the first version of the micro:bit. We have also included a compatibility layer so that the vast majority of C/C++ programs built using [microbit-dal](https://www.github.com/lancaster-university/microbit-dal) will operate with few changes.
-
-# Documentation
-API documentation is embedded in the code using doxygen. We will produce integrated web-based documentation soon.
+This repo follows the APIs of the original micro:bit and includes a
+[microbit-dal](https://www.github.com/lancaster-university/microbit-dal)
+compatibility layer. micro:bit platform issues should be raised on
+[lancaster-university/codal-microbit-v2](https://github.com/lancaster-university/codal-microbit-v2).
