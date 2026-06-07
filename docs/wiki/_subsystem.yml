@@ -1,0 +1,4 @@
+name: microbit-radio-relay
+title: micro:bit Radio Relay
+blurb: C++/CODAL firmware that turns a micro:bit V2 into a transparent USB-serial ↔ nRF radio bridge — no host library required, dual-mode (RAW250 / MakeCode), flash-persistent config.
+order: 110
