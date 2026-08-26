@@ -37,16 +37,28 @@ SETTLE = 0.4
 
 
 def _normalise(chunks: list[bytes]) -> list[list[str]]:
-    """Compare line sets, not byte chunking.
+    """Reduce a transcript to the board's replies to OUR commands.
 
-    A serial reader gets arbitrary chunk boundaries anyway, so requiring
-    identical framing would be testing the kernel, not the daemon.
+    Two things are dropped, both deliberately:
+
+    * Chunk boundaries. A serial reader gets arbitrary ones anyway, so requiring
+      identical framing would be testing the kernel, not the daemon.
+    * Everything that is not a "#" comment. Per the protocol, the relay answers
+      every command with a "#"-prefixed line, so keeping only those keeps
+      exactly the thing under test.
+
+      Filtering positively matters. The first attempt dropped lines starting
+      with "<" (messages the board RECEIVED over the radio, which other boards
+      on the bench emit whenever they like, in different numbers each run). But
+      a read can split such a line, leaving a bare fragment like "0 0 none"
+      with no "<" on it -- which then failed the comparison for reasons that
+      had nothing to do with the transport.
     """
     out = []
     for chunk in chunks:
         lines = [line.decode(errors="replace").strip()
                  for line in chunk.replace(b"\r\n", b"\n").split(b"\n")]
-        out.append([line for line in lines if line])
+        out.append([line for line in lines if line.startswith("#")])
     return out
 
 

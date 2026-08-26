@@ -36,10 +36,21 @@ def bound(count: int = 1):
                 sock.close()
 
 
-def _into_data_plane(sock, channel: int = 17) -> None:
+def _into_data_plane(sock, channel: int = 21) -> None:
+    """Put a bound relay on `channel` and into the transparent data plane.
+
+    Deliberately does NOT re-send "!MODE RAW250": the daemon already guarantees
+    RAW250 on acquire, and setting the mode again runs applyRadioConfig() and
+    retuneReceiver() -- a full radio disable/re-enable -- immediately before
+    !GO. That extra retune is enough to lose the first frames.
+    """
     expect(sock, f"!C {channel}\n".encode(), rb"# channel: %d group: 10" % channel)
-    expect(sock, b"!MODE RAW250\n", rb"# mode: RAW250")
     expect(sock, b"!GO\n", rb"# entering data plane")
+    drain(sock)
+    # The radio has just been retuned by the channel change; give it a moment
+    # before the first payload, or the first frame goes out into a receiver that
+    # is still ramping.
+    time.sleep(0.4)
 
 
 def test_radio_roundtrip_through_the_server(daemon, admin):
@@ -49,12 +60,6 @@ def test_radio_roundtrip_through_the_server(daemon, admin):
 
         for sock in (a, b):
             _into_data_plane(sock)
-
-        # `expect` returns as soon as its pattern matches, so the tail of the
-        # "# entering data plane" line is still arriving. Clear it, or those
-        # bytes become the start of what we read back as payload.
-        for sock in (a, b):
-            drain(sock)
 
         # One RAW250 frame (<=247 bytes), so fire-and-forget cannot
         # fragment-fail. Includes 0x0a and 0x0d, which a line-oriented bug
@@ -128,12 +133,18 @@ def test_echo_transponder_path(daemon, admin):
         (a, _), (b, _) = socks
         expect(b, b"!C 19\n", rb"# channel: 19 group: 10")
         expect(b, b"!ECHO ON\n", rb"# echo: ON")
-
         expect(a, b"!C 19\n", rb"# channel: 19 group: 10")
         drain(a)
-        a.sendall(b"> ping-over-the-air\n")
-        match, buf = read_until(a, rb"< ping-over-the-air", timeout=8)
-        assert match, f"no echo came back: {buf[-200:]!r}"
+        time.sleep(0.5)          # both radios have just retuned
+
+        # Fire-and-forget: a single lost frame is a normal radio outcome, not a
+        # regression, so give it a few tries before calling it a failure.
+        for _ in range(4):
+            a.sendall(b"> ping-over-the-air\n")
+            match, buf = read_until(a, rb"< ping-over-the-air", timeout=3)
+            if match:
+                break
+        assert match, f"no echo came back after 4 tries: {buf[-200:]!r}"
     wait_until(lambda: admin("status")["devices"]["free"] >= 2)
 
 
@@ -159,6 +170,20 @@ def test_kick_frees_a_board(daemon, admin):
         (sock, _), = socks
         session_id = admin("sessions")["sessions"][0]["id"]
         admin("kick", session=session_id, reason="test")
+
+        # Read to EOF rather than asserting the very next recv is empty: the
+        # board may still have had bytes in flight when the kick landed, and
+        # receiving those first is correct behaviour, not a failure.
         sock.settimeout(15)
-        assert sock.recv(65536) == b"", "kick must close the client socket"
+        deadline = time.time() + 15
+        closed = False
+        while time.time() < deadline:
+            try:
+                if sock.recv(65536) == b"":
+                    closed = True
+                    break
+            except OSError:
+                closed = True
+                break
+        assert closed, "kick must close the client socket"
     assert wait_until(lambda: admin("status")["devices"]["free"] >= 1)

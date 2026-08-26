@@ -5,4 +5,4 @@ the socket is a transparent byte pipe to that board's serial port. See
 ``docs/relay-server.md`` in the repository root for the full contract.
 """
 
-__version__ = "0.20260826.6"
+__version__ = "0.20260826.7"
