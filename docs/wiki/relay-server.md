@@ -143,6 +143,17 @@ On the League fleet the server is installed by Ansible and runs under systemd, s
 `systemctl status mbrelay` and `journalctl -u mbrelay` are the first things to
 try when something looks wrong.
 
+## If a board stops answering
+
+A board that was held by the server when the server was killed outright (rather
+than stopped cleanly) can be left in the data plane, where it answers `HELLO`
+with silence — in that state your text is radio payload, not a command.
+
+Stopping the service properly avoids it: `systemctl stop mbrelay` sends
+`SIGTERM`, and the daemon then resets and restores every board it holds before
+exiting. If a board does get stranded, reflashing it always brings it back,
+because that resets the chip unconditionally.
+
 ## How boards are identified
 
 The key is the **DAPLink USB UID**, not the device path — `/dev/ttyACM*`

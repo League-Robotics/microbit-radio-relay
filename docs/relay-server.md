@@ -234,6 +234,20 @@ line, describing the state that actually ended up on the board.
 radio IRQ masked), and a burst arriving behind that lands in a board that is not
 reading.
 
+**Probing is scheduled, not just started.** Probes queue behind a concurrency
+semaphore, and a record that stays `UNKNOWN` while queued gets a *second* probe
+scheduled by the next scan. Since every probe opens the port and therefore
+reboots the board, duplicates reset boards out from under each other and healthy
+relays come back as `no_firmware`. The record is marked `PROBING` synchronously
+at schedule time. This only shows up with three or more boards.
+
+**A board can be left stranded in the data plane.** If the daemon is `SIGKILL`ed
+while a session holds a board, nothing resets it, and a board sitting in the data
+plane answers `HELLO` with silence — it is radio payload, not a command. Stopping
+the service cleanly (`systemctl stop`, which sends `SIGTERM`) avoids this, because
+the daemon drains and restores every board first. If one does get stranded and
+does not recover, `mbrelay flash` it: reflashing resets the chip unconditionally.
+
 **`!DEFAULTS` is not enough on its own.** It clears the stored flash record; the
 *live* configuration is untouched until the next reset. Normalizing therefore
 sends explicit values. There is a unit test pinning this so a future
