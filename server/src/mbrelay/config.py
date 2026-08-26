@@ -71,6 +71,12 @@ class SerialConfig:
     hello_timeout_ms: int = 2000
     hello_attempts: int = 4
     post_close_settle_ms: int = 500
+    # Reopening the port resets the board on macOS but NOT on Linux (measured on
+    # Ubuntu 24.04 / DAPLink v0257). A break condition does, reliably, so it is
+    # the fallback when a board does not answer HELLO -- which almost always
+    # means it is stuck in the relay's inescapable data plane.
+    break_duration_ms: int = 400
+    break_settle_ms: int = 1200
     acquire_budget_ms: int = 12000
     release_budget_ms: int = 15000
     write_high_water: int = 65536

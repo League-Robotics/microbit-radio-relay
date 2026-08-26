@@ -64,6 +64,13 @@ class ByteChannel(Protocol):
     def write_nowait(self, data: bytes) -> None:
         """Queue bytes. Never blocks; buffers if the tty is not ready."""
 
+    async def send_break(self, duration: float = 0.4) -> None:
+        """Assert a break condition, which reboots the board.
+
+        The escape hatch for a board stuck in the relay's data plane on a
+        platform where close/reopen does not reset it. See RelayControl.hello.
+        """
+
     async def drain(self) -> None: ...
 
     @property
@@ -240,6 +247,15 @@ class SerialChannel:
         if self._writing and self._fd >= 0 and self._loop is not None:
             self._loop.remove_writer(self._fd)
         self._writing = False
+
+    async def send_break(self, duration: float = 0.4) -> None:
+        """Hold the line in a break condition for `duration` seconds.
+
+        Blocking in pyserial (it sleeps for the duration), so run it off-thread.
+        """
+        if self._ser is None or not self._ser.is_open:
+            return
+        await asyncio.to_thread(self._ser.send_break, duration)
 
     async def drain(self, timeout: float = 2.0) -> None:
         loop = asyncio.get_running_loop()

@@ -51,7 +51,10 @@ class FakeRelayFirmware:
 
     # -- lifecycle ---------------------------------------------------------
     def reset(self) -> None:
-        """What opening the port does: reboot, reload flash, back to command plane."""
+        """Reboot: reload flash, back to the command plane.
+
+        What a DTR reset (macOS) or a break condition (everywhere) does.
+        """
         self.boot_count += 1
         self.cfg = replace(self.flash) if self.flash else replace(DEFAULTS)
         self.plane = "command"
@@ -169,10 +172,15 @@ class FakeChannel:
     """A ByteChannel backed by a FakeRelayFirmware."""
 
     def __init__(self, firmware: FakeRelayFirmware, latency: float = 0.0,
-                 vanish_after_bytes: int | None = None) -> None:
+                 vanish_after_bytes: int | None = None,
+                 break_resets: bool = True) -> None:
         self.fw = firmware
         self.latency = latency
         self.vanish_after = vanish_after_bytes
+        # break_resets=False models a board that a break cannot rescue, e.g. one
+        # running no relay firmware at all.
+        self.break_resets = break_resets
+        self.breaks_sent = 0
         self.written = bytearray()
         self.closed = False
         self.reader_removed_before_close = None
@@ -220,6 +228,11 @@ class FakeChannel:
                 self._on_error(OSError("device vanished"))
             return
         self.fw.feed(data)
+
+    async def send_break(self, duration: float = 0.4) -> None:
+        self.breaks_sent += 1
+        if self.break_resets:
+            self.fw.reset()          # a break reboots the board, like a DTR reset
 
     async def drain(self) -> None:
         await asyncio.sleep(0)

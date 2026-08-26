@@ -241,12 +241,34 @@ reboots the board, duplicates reset boards out from under each other and healthy
 relays come back as `no_firmware`. The record is marked `PROBING` synchronously
 at schedule time. This only shows up with three or more boards.
 
-**A board can be left stranded in the data plane.** If the daemon is `SIGKILL`ed
-while a session holds a board, nothing resets it, and a board sitting in the data
-plane answers `HELLO` with silence — it is radio payload, not a command. Stopping
-the service cleanly (`systemctl stop`, which sends `SIGTERM`) avoids this, because
-the daemon drains and restores every board first. If one does get stranded and
-does not recover, `mbrelay flash` it: reflashing resets the chip unconditionally.
+**Resetting a board is platform-specific, and Linux is the hard case.** This is
+the single most surprising thing in the project. Measured on Ubuntu 24.04 against
+DAPLink v0257 on a micro:bit V2:
+
+| Attempted reset | macOS | Linux |
+| --- | --- | --- |
+| close + reopen the port | resets | **no effect** |
+| explicit DTR pulse | — | no effect |
+| DTR held low for 2 s | — | no effect |
+| 1200-baud touch | — | no effect |
+| RTS pulse | — | no effect |
+| **break condition** | — | **resets, every time** |
+| pyOCD `reset` over SWD | resets | resets |
+
+On Linux the device does not even re-enumerate on the open, so nothing is
+happening at all. A board parked in the data plane therefore stays deaf
+indefinitely, and since the data plane has no in-band escape it looks exactly
+like a board with no firmware — which is how an hour went into chasing a phantom
+firmware fault before the measurements above settled it.
+
+So `hello()` sends a **break** when nothing answers, and only then. The break
+costs about 1.6 s, so keeping it off the happy path matters; a healthy board
+never pays for it. `mbrelay flash` remains the last resort, since reflashing
+resets the chip unconditionally.
+
+Stopping the service cleanly (`systemctl stop`, i.e. `SIGTERM`) avoids stranding
+boards in the first place: the daemon drains and restores every board it holds
+before exiting. A `SIGKILL` skips that, which is how boards get stranded.
 
 **`!DEFAULTS` is not enough on its own.** It clears the stored flash record; the
 *live* configuration is untouched until the next reset. Normalizing therefore

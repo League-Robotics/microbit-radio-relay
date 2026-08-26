@@ -124,14 +124,54 @@ class RelayControl:
         self.hello_timeout = s.hello_timeout_ms / 1000
         self.hello_attempts = max(1, s.hello_attempts)
         self.post_close_settle = s.post_close_settle_ms / 1000
+        self.break_duration = s.break_duration_ms / 1000
+        self.break_settle = s.break_settle_ms / 1000
 
-    async def hello(self, channel: ByteChannel, reader: Reader) -> BannerInfo:
+    async def hello(self, channel: ByteChannel, reader: Reader,
+                    allow_break: bool = True) -> BannerInfo:
         """Confirm we are in the command plane, and learn which board this is.
 
         The boot banner went out while we were still opening the port, so ask
         again. Several attempts, because a board still running its boot animation
         can miss the first line.
+
+        If nothing answers, send a break before giving up. A silent board is
+        almost always one sitting in the data plane, where "HELLO" is radio
+        payload rather than a command -- and the data plane has no in-band
+        escape, so the only way out is a reboot.
+
+        Reopening the port is supposed to be that reboot, and on macOS it is. On
+        Linux it is not: measured on Ubuntu 24.04 against DAPLink v0257, neither
+        close/reopen, nor a DTR pulse, nor a 1200-baud touch resets the target,
+        and a board parked in the data plane stays deaf indefinitely. A break
+        condition rescues it every time. So the break is not paranoia -- without
+        it the release guarantee simply does not hold on the platform the fleet
+        actually runs.
         """
+        if info := await self._ask_hello(channel, reader):
+            return info
+
+        if allow_break:
+            log.info("no banner; sending a break to reset the board "
+                     "(it is probably stuck in the data plane)")
+            try:
+                await channel.send_break(self.break_duration)
+            except Exception as exc:
+                log.debug("send_break failed: %r", exc)
+            else:
+                await asyncio.sleep(self.break_settle)
+                reader.clear()
+                if info := await self._ask_hello(channel, reader):
+                    log.info("break recovered the board")
+                    return info
+
+        raise RelayError("no DEVICE banner after "
+                         f"{self.hello_attempts} HELLO attempts"
+                         f"{' and a break' if allow_break else ''} -- "
+                         "board may not be running relay firmware")
+
+    async def _ask_hello(self, channel: ByteChannel,
+                         reader: Reader) -> "BannerInfo | None":
         for attempt in range(self.hello_attempts):
             channel.write_nowait(b"HELLO\n")
             match = await reader.wait_for(BANNER_RE, self.hello_timeout)
@@ -140,9 +180,7 @@ class RelayControl:
                 if info is not None:
                     return info
             log.debug("no banner yet attempt=%d/%d", attempt + 1, self.hello_attempts)
-        raise RelayError("no DEVICE banner after "
-                         f"{self.hello_attempts} HELLO attempts -- "
-                         "board may be in the data plane, or not running relay firmware")
+        return None
 
     async def normalize(self, channel: ByteChannel, reader: Reader,
                         step_timeout: float = 1.5, retries: int = 1) -> None:

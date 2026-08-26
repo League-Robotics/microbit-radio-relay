@@ -6,6 +6,8 @@ starts failing, the daemon is about to hand somebody a dirty board.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from mbrelay.errors import RelayError
@@ -145,3 +147,51 @@ def test_normalize_steps_cover_every_persisted_setting():
     for expected in (b"!MODE", b"!FRAG", b"!ECHO", b"!P ", b"!C "):
         assert expected in sent
     assert DEFAULT_CFG == (0, 10, b"RAW250", 7)
+
+
+async def test_a_break_rescues_a_board_stuck_in_the_data_plane(cfg, factory, control):
+    """The escape hatch the whole release guarantee depends on, on Linux.
+
+    Reopening the port resets the board on macOS but not on Linux -- measured on
+    Ubuntu 24.04 against DAPLink v0257, where neither close/reopen nor a DTR
+    pulse nor a 1200-baud touch does anything, and a board parked in the data
+    plane stays deaf forever. A break condition recovers it every time.
+    """
+    board = factory.boards[PORT_A]
+    channel = await factory.open(PORT_A)
+    reader = Reader(channel)
+
+    # Let the boot banner arrive and clear it, otherwise hello() would match that
+    # stale line and never discover the board has stopped listening.
+    await asyncio.sleep(0.05)
+    reader.clear()
+    board.plane = "data"                     # deaf: HELLO is now radio payload
+    assert channel.breaks_sent == 0
+
+    info = await control.hello(channel, reader)
+
+    assert channel.breaks_sent == 1, "hello did not fall back to a break"
+    assert info.device_name == "aaaaa"
+    assert board.plane == "command"
+
+
+async def test_no_break_is_sent_when_the_board_answers(cfg, factory, control):
+    """The break costs over a second, so it must stay on the failure path only."""
+    channel = await factory.open(PORT_A)
+    reader = Reader(channel)
+    await control.hello(channel, reader)
+    assert channel.breaks_sent == 0
+
+
+async def test_a_board_a_break_cannot_rescue_still_reports_clearly(cfg, factory,
+                                                                   control):
+    factory.kwargs["break_resets"] = False
+    board = FakeRelayFirmware(drop_first_banners=99)
+    board._handle = lambda line: None
+    factory.boards[PORT_A] = board
+
+    channel = await factory.open(PORT_A)
+    reader = Reader(channel)
+    with pytest.raises(RelayError, match="and a break"):
+        await control.hello(channel, reader)
+    assert channel.breaks_sent == 1

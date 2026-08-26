@@ -90,12 +90,26 @@ replugged or repowered. Writes are skipped when the value is unchanged, to spare
 the flash erase budget. Use `!DEFAULTS` to clear the saved record and fall back to
 the compiled-in defaults on the next reset (§3.6).
 
-> **Reset mechanics (verified on hardware):** closing **and reopening** the port
-> resets the board. Opening the host serial port toggles DTR, which resets the
-> device. An in-place DTR toggle on an already-open port does *not* reset, so the
-> host must fully close and reopen. After reopen, send `HELLO` and wait for the
-> banner to confirm the command plane — the boot banner emitted during the closed
-> window is missed. See `scripts/relay_test.py` (`reset_to_command`).
+> **Reset mechanics — and they are platform-specific.**
+>
+> On **macOS**, closing **and reopening** the port resets the board: the open
+> toggles DTR, and DAPLink resets its target on that transition. An in-place DTR
+> toggle on an already-open port does *not* reset, so the host must fully close
+> and reopen. After reopen, send `HELLO` and wait for the banner to confirm the
+> command plane — the boot banner emitted during the closed window is missed. See
+> `scripts/relay_test.py` (`reset_to_command`).
+>
+> On **Linux this does not work at all.** Measured on Ubuntu 24.04 against
+> DAPLink v0257 on a micro:bit V2: close/reopen, an explicit DTR pulse, holding
+> DTR low for two seconds, a 1200-baud touch, and an RTS pulse *all* leave the
+> target running. The device never even re-enumerates. A board parked in the data
+> plane therefore stays deaf indefinitely, and since the data plane has no in-band
+> escape, nothing short of a reflash recovers it.
+>
+> **A break condition does reset it, reliably** — verified on four boards, every
+> attempt. So a host that needs to guarantee it can reach the command plane must
+> send a break when `HELLO` goes unanswered rather than trusting the reopen.
+> `mbrelay` does exactly that (see [Relay Server](relay-server)).
 
 ---
 

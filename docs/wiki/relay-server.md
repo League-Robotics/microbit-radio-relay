@@ -145,14 +145,21 @@ try when something looks wrong.
 
 ## If a board stops answering
 
-A board that was held by the server when the server was killed outright (rather
-than stopped cleanly) can be left in the data plane, where it answers `HELLO`
-with silence — in that state your text is radio payload, not a command.
+A board can end up stranded in the data plane — for example if the server was
+killed outright rather than stopped cleanly, so it never got to reset the board
+it was holding. A stranded board answers `HELLO` with silence, because in the
+data plane your text is radio payload rather than a command.
 
-Stopping the service properly avoids it: `systemctl stop mbrelay` sends
-`SIGTERM`, and the daemon then resets and restores every board it holds before
-exiting. If a board does get stranded, reflashing it always brings it back,
-because that resets the chip unconditionally.
+The server recovers this by itself: when a board does not answer, it sends a
+**break condition**, which reboots it. That fallback exists because resetting a
+micro:bit turns out to be platform-specific — closing and reopening the serial
+port resets the board on macOS but does nothing at all on Linux, which is what
+the fleet runs. (Neither does a DTR pulse, nor a 1200-baud touch. A break does,
+every time.)
+
+If a board still will not answer, reflash it: that resets the chip
+unconditionally. And prefer `systemctl stop mbrelay` over killing the process —
+`SIGTERM` lets the daemon hand every board back cleanly first.
 
 ## How boards are identified
 
