@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import re
 import time
 from typing import Callable
 
@@ -35,6 +36,14 @@ _ids = itertools.count(1)
 # read-only so "mbrelay status" can say which plane a session is in.
 _DATA_PLANE_MARK = b"# entering data plane"
 
+# Channel-setting commands, watched on the client->board side. The radio is a
+# shared medium and nothing stops two sessions picking the same channel -- at
+# which point each user's robot acts on the other's commands. The daemon does
+# not police this (it is a transparent pipe, and a channel may be shared on
+# purpose), but it can at least SEE it: the channel shows up in `mbrelay status`
+# and a collision is logged.
+_CHANNEL_RE = re.compile(rb"^!(?:C|CG|RC)\s+(\d+)", re.MULTILINE)
+
 
 class Session:
     """One client socket bound to one board."""
@@ -43,7 +52,8 @@ class Session:
                  reader: Reader, peer: str, preamble: bytes) -> None:
         self.id = f"s-{next(_ids)}"
         self.record = record
-        self.channel = channel
+        self.channel = channel                # the serial port
+        self._on_channel: Callable[["Session"], None] = lambda s: None
         self.reader = reader
         self.peer = peer
         self.preamble = preamble
@@ -52,6 +62,8 @@ class Session:
         self.tx_bytes = 0            # client -> board
         self.last_activity = self.started
         self.plane = "command"
+        self.radio_channel: int | None = None   # last channel this client selected
+        self._cmd_tail = b""
         # Serial reads land on arbitrary chunk boundaries, so the marker below
         # can straddle two of them. Keep the tail of the previous chunk and
         # search the join.
@@ -113,14 +125,36 @@ class Session:
     def write_to_board(self, data: bytes) -> None:
         self.tx_bytes += len(data)
         self.last_activity = time.time()
+        if self.plane == "command":
+            self._watch_for_channel(data)
         self.channel.write_nowait(data)
+
+    def _watch_for_channel(self, data: bytes) -> None:
+        """Note which channel the client selected. Read-only; nothing is altered.
+
+        Only whole lines are parsed, and only in the command plane -- after !GO
+        the same bytes are radio payload and mean nothing here.
+        """
+        window = self._cmd_tail + data
+        lines, _, self._cmd_tail = window.rpartition(b"\n")
+        if len(self._cmd_tail) > 256:          # not a line; stop accumulating
+            self._cmd_tail = b""
+        for match in _CHANNEL_RE.finditer(lines):
+            try:
+                channel = int(match.group(1))
+            except ValueError:
+                continue
+            if channel != self.radio_channel:
+                self.radio_channel = channel
+                self._on_channel(self)
 
     def to_json(self) -> dict:
         return {
             "id": self.id, "uid": self.record.uid, "device_name": self.record.name,
             "port": self.record.port, "peer": self.peer,
             "started": round(self.started, 3), "age_s": round(self.age, 1),
-            "plane": self.plane, "rx_bytes": self.rx_bytes, "tx_bytes": self.tx_bytes,
+            "plane": self.plane, "channel": self.radio_channel,
+            "rx_bytes": self.rx_bytes, "tx_bytes": self.tx_bytes,
             "idle_s": round(self.idle, 1),
         }
 
@@ -155,7 +189,8 @@ class SessionManager:
             if time.monotonic() >= deadline:
                 counts = self.inventory.counts()
                 self.rejected_total += 1
-                raise NoFreeDevice(total=counts["total"], busy=counts["busy"])
+                raise NoFreeDevice(total=counts["total"], busy=counts["busy"],
+                                   releasing=counts["releasing"])
             await asyncio.sleep(0.25)
 
     async def _try_acquire(self, peer: str) -> Session | None:
@@ -202,6 +237,9 @@ class SessionManager:
 
         preamble = b"" if self.cfg.server.preamble == "none" else info.raw + b"\r\n"
         session = Session(record, channel, reader, peer, preamble)
+        session._on_channel = self._channel_selected
+        if self.cfg.server.announce_session:
+            session.preamble = f"# session {session.id}\r\n".encode() + session.preamble
         record.state = DeviceState.BUSY
         record.session_id = session.id
         record.sessions_total += 1
@@ -267,6 +305,27 @@ class SessionManager:
         task = asyncio.create_task(retry(), name=f"mbrelay-restore-{record.uid[-8:]}")
         self._retry_tasks.add(task)
         task.add_done_callback(self._retry_tasks.discard)
+
+    def _channel_selected(self, session: Session) -> None:
+        """A client picked a radio channel. Warn if another session shares it.
+
+        The radio is a shared medium: two sessions on one channel hear each
+        other's traffic, and each robot acts on the other's commands. The daemon
+        does not enforce exclusivity -- a shared channel is sometimes exactly
+        what you want, and the data plane is a transparent pipe -- but an
+        operator should be able to see the collision rather than deduce it from
+        a robot moving on its own.
+        """
+        clash = [s for s in self.sessions.values()
+                 if s is not session and s.radio_channel == session.radio_channel]
+        if clash:
+            log.warning(
+                "channel_collision channel=%s sessions=%s -- these clients share "
+                "one radio channel and will hear each other's robots",
+                session.radio_channel,
+                ", ".join(f"{s.id}({s.peer})" for s in [session, *clash]))
+        else:
+            session.log.info("channel_selected channel=%s", session.radio_channel)
 
     # -- external events ---------------------------------------------------
     def _device_gone(self, record: DeviceRecord) -> None:

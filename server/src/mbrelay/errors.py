@@ -22,10 +22,12 @@ class RelayError(MbrelayError):
 class NoFreeDevice(MbrelayError):
     """No relay was available to bind to an incoming connection."""
 
-    def __init__(self, total: int = 0, busy: int = 0) -> None:
+    def __init__(self, total: int = 0, busy: int = 0, releasing: int = 0) -> None:
         self.total = total
         self.busy = busy
-        super().__init__(f"no relay available ({total} devices, {busy} busy)")
+        self.releasing = releasing
+        super().__init__(f"no relay available ({total} devices, {busy} in use, "
+                         f"{releasing} being handed back)")
 
 
 class AcquireFailed(MbrelayError):

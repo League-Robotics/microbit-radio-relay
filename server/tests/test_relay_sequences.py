@@ -11,7 +11,8 @@ import asyncio
 import pytest
 
 from mbrelay.errors import RelayError
-from mbrelay.relay import DEFAULT_CFG, NORMALIZE_STEPS, Reader, RelayControl
+from mbrelay.relay import (CONFIG_RE, DEFAULT_CFG, NORMALIZE_STEPS, Reader,
+                           RelayControl)
 
 from relay_fixtures import PORT_A
 from fake_relay import FakeRelayFirmware, StoredConfig
@@ -195,3 +196,49 @@ async def test_a_board_a_break_cannot_rescue_still_reports_clearly(cfg, factory,
     with pytest.raises(RelayError, match="and a break"):
         await control.hello(channel, reader)
     assert channel.breaks_sent == 1
+
+
+async def test_a_banner_split_across_reads_is_not_truncated(cfg, factory, control):
+    """Reported from the field: ~68% of connect banners arrived with the serial
+    cut short -- getez:1784514240 seen as 178451, 17845, 178, even 1.
+
+    BANNER_RE ends in ([0-9A-Fa-f]+), and wait_for re-scans the buffer on every
+    chunk, so the moment a read delivered ":getez:1" the regex matched with a
+    one-digit serial. The board name always survived because ([^:]+) needs its
+    trailing colon to match at all -- which is exactly the signature the report
+    described.
+    """
+    factory.kwargs["chunk_size"] = 1        # worst case: one byte per read
+    channel = await factory.open(PORT_A)
+    reader = Reader(channel)
+
+    info = await control.hello(channel, reader)
+
+    assert info.serial == "1111111111", f"serial was truncated to {info.serial!r}"
+    assert info.device_name == "aaaaa"
+
+
+async def test_wait_for_ignores_an_unterminated_line():
+    """The invariant behind the fix: a pattern may only match a line the board
+    has actually finished.
+
+    Every reply in the command plane is a whole line, so matching a prefix is
+    never correct -- it merely happens to be harmless for fields that cannot
+    grow. Driven directly rather than through a channel, so nothing else can
+    interleave bytes mid-line.
+    """
+    class _Idle:
+        def start_reading(self, on_data, on_error):
+            pass
+
+    reader = Reader(_Idle())
+
+    reader._on_data(b"# channel: 1")          # a prefix of "channel: 17"
+    assert await reader.wait_for(CONFIG_RE, 0.05) is None, \
+        "matched a line the board had not finished sending"
+
+    reader._on_data(b"7 group: 10 mode: RAW250 power: 7\r\n")
+    match = await reader.wait_for(CONFIG_RE, 0.5)
+    assert match, "did not match once the line was complete"
+    assert int(match.group(1)) == 17
+    assert int(match.group(2)) == 10

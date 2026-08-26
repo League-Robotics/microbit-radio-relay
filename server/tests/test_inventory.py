@@ -60,7 +60,7 @@ async def test_boards_are_discovered_and_classified(inventory):
     assert all(r.state is DeviceState.FREE for r in inventory.records.values())
     assert inventory.records[UID_A].device_name == "aaaaa"
     assert inventory.counts() == {"total": 2, "free": 2, "busy": 0,
-                                  "error": 0, "other": 0}
+                                  "releasing": 0, "error": 0, "other": 0}
 
 
 async def test_a_board_without_relay_firmware_is_marked_not_probed_forever(

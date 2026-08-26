@@ -173,10 +173,13 @@ class FakeChannel:
 
     def __init__(self, firmware: FakeRelayFirmware, latency: float = 0.0,
                  vanish_after_bytes: int | None = None,
-                 break_resets: bool = True) -> None:
+                 break_resets: bool = True, chunk_size: int | None = None) -> None:
         self.fw = firmware
         self.latency = latency
         self.vanish_after = vanish_after_bytes
+        # Deliver output in small pieces, the way a real tty does. Without this
+        # every reply arrives whole and prefix-matching bugs stay invisible.
+        self.chunk_size = chunk_size
         # break_resets=False models a board that a break cannot rescue, e.g. one
         # running no relay firmware at all.
         self.break_resets = break_resets
@@ -200,7 +203,12 @@ class FakeChannel:
                 await asyncio.sleep(max(self.latency, 0.001))
                 if self._reading and self._on_data is not None:
                     if data := self.fw.drain():
-                        self._on_data(data)
+                        if self.chunk_size:
+                            for i in range(0, len(data), self.chunk_size):
+                                self._on_data(data[i:i + self.chunk_size])
+                                await asyncio.sleep(0)
+                        else:
+                            self._on_data(data)
         except asyncio.CancelledError:
             pass
 

@@ -92,12 +92,24 @@ class Reader:
     def clear(self) -> None:
         self.buf.clear()
 
+    def complete_lines(self) -> bytes:
+        """The buffer up to and including its last newline.
+
+        Everything the relay says in the command plane is a whole line, and
+        matching a pattern against a PARTIAL line is how banners came back
+        truncated in the field: BANNER_RE ends in ([0-9A-Fa-f]+), so the moment a
+        read delivered ":getez:1" it matched with a one-digit serial and the
+        remaining digits were discarded. Only ever match what has terminated.
+        """
+        end = self.buf.rfind(b"\n")
+        return bytes(self.buf[:end + 1]) if end >= 0 else b""
+
     async def wait_for(self, pattern: re.Pattern[bytes], timeout: float):
-        """Scan the accumulated buffer for a pattern until it matches or time runs out."""
+        """Scan the completed lines for a pattern until it matches or time runs out."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while True:
-            if m := pattern.search(self.buf):
+            if m := pattern.search(self.complete_lines()):
                 return m
             if self.failed:
                 raise RelayError(f"device read failed: {self.error!r}")
@@ -108,7 +120,7 @@ class Reader:
             try:
                 await asyncio.wait_for(self._event.wait(), timeout=remaining)
             except TimeoutError:
-                return pattern.search(self.buf)
+                return pattern.search(self.complete_lines())
 
 
 class RelayControl:

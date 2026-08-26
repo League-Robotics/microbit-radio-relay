@@ -86,11 +86,13 @@ class RelayProtocol(asyncio.Protocol):
         comment syntax: a client that already skips '#' lines is unaffected, and
         a human on netcat can read why.
         """
-        log.warning("session_reject peer=%s reason=no_free_device total=%d busy=%d",
-                    self._peer, exc.total, exc.busy)
+        log.warning("session_reject peer=%s reason=no_free_device total=%d "
+                    "busy=%d releasing=%d",
+                    self._peer, exc.total, exc.busy, exc.releasing)
         template = self.cfg.server.reject_message
         if template and self.transport is not None:
-            message = template.format(total=exc.total, busy=exc.busy)
+            message = template.format(total=exc.total, busy=exc.busy,
+                                      releasing=exc.releasing)
             self.transport.write(message.encode("utf-8", "replace") + b"\r\n")
             self.transport.close()
         else:

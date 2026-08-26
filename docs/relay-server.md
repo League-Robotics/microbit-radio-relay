@@ -81,13 +81,35 @@ comment syntax and then closes:
 
 ```
 $ nc relay-host 8760
-# ERROR: no relay available (4 devices, 4 busy)
+# ERROR: no relay available (4 devices, 3 in use, 1 being handed back)
 $
 ```
 
 Any client that already ignores `#` lines — which is any client written against
-the relay protocol — is unaffected, and a human gets a readable answer. Set
+the relay protocol — is unaffected, and a human gets a readable answer.
+
+Note the two counts. A board that is *in use* is held by another client; a board
+*being handed back* is mid-reset and belongs to nobody — it will be free in a
+second or two. Lumping them together made it look as though a colleague had a
+board when nobody did. Set
 `server.reject_message = ""` to close with zero bytes instead.
+
+### You do not always need `!GO`
+
+`!GO` is a one-way door — the only way back to the command plane is to
+disconnect and reconnect. For a single query that is a heavy way to do it, and
+the command plane can already talk to the radio:
+
+```
+> ping            # send one line over the radio, no !GO needed
+< pong            # anything received comes back on a "<" line
+```
+
+`HELLO` re-requests the board's announcement at any time, which is a quick way
+to confirm which board you are holding.
+
+Use `!GO` when you want a transparent byte stream. Use `>` for one-shot
+request/response, which is most interactive use.
 
 ## 4. Using it
 
@@ -107,8 +129,27 @@ s.sendall(b"!C 5\n!GO\n")     # channel 5, then transparent
 s.sendall(b"hello over the radio")
 ```
 
-Set `TCP_NODELAY`. Without it Nagle adds about 40 ms to every small write, which
-roughly doubles the observed radio round-trip.
+Set `TCP_NODELAY`. Nagle delays small writes that follow one another closely,
+which can add tens of milliseconds to a radio round-trip. Pacing writes a few
+hundred milliseconds apart hides the effect, but it costs nothing to set.
+
+## The radio is shared — check your channel
+
+Four boards means four simultaneous users, and they all transmit into the same
+air. **Two clients that pick the same channel will hear each other's robots, and
+each robot will act on the other's commands.** Nothing in the service prevents
+this: a shared channel is sometimes exactly what you want, and the data plane is
+a transparent pipe with no place to interpose.
+
+What the server does do is make it visible. The channel each client selects shows
+up in `mbrelay status`, and a collision is logged:
+
+```
+channel_collision channel=4 sessions=s-2(10.0.0.9:52344), s-5(10.0.0.14:41022)
+```
+
+If you are driving a robot, agree a channel with whoever else is using the pool,
+and check `mbrelay status` before you start.
 
 ## 5. Operating it
 

@@ -50,13 +50,20 @@ class ServerConfig:
     # The "#" prefix is the relay's own comment convention, so a client that
     # already skips "#" lines is unaffected. "{total}" and "{busy}" are filled in.
     # Set to "" to send zero bytes and abort() instead.
-    reject_message: str = "# ERROR: no relay available ({total} devices, {busy} busy)"
+    reject_message: str = ("# ERROR: no relay available ({total} devices, "
+                           "{busy} in use, {releasing} being handed back)")
 
     # 0 honours "reject immediately if none free" literally. Test harnesses that
     # reconnect straight after disconnecting want ~8000 -- see the release window
     # note in docs/relay-server.md.
     acquire_wait_ms: int = 0
     acquire_retries: int = 2
+
+    # Prepend "# session <id>" to the preamble so a client can correlate its own
+    # socket with `mbrelay status` and `mbrelay kick`. Off by default: it is a
+    # byte a real serial port would never send, and byte-for-byte equivalence
+    # with a direct connection is the point of this service.
+    announce_session: bool = False
 
     # banner: replay the board's announcement, as a direct serial open would show
     # none:   send nothing; the client sends HELLO itself

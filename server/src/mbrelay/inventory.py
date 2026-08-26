@@ -350,16 +350,22 @@ class Inventory:
         return None
 
     def counts(self) -> dict[str, int]:
-        out = {"total": 0, "free": 0, "busy": 0, "error": 0, "other": 0}
+        # "busy" and "releasing" are reported separately: a board being handed
+        # back is not held by anybody, and lumping the two together made the
+        # pool-exhaustion message read as though a colleague had a board when
+        # nobody did.
+        out = {"total": 0, "free": 0, "busy": 0, "releasing": 0,
+               "error": 0, "other": 0}
         for rec in self.records.values():
             if rec.state is DeviceState.GONE:
                 continue
             out["total"] += 1
             if rec.state is DeviceState.FREE:
                 out["free"] += 1
-            elif rec.state in (DeviceState.ACQUIRING, DeviceState.BUSY,
-                               DeviceState.RELEASING):
+            elif rec.state in (DeviceState.ACQUIRING, DeviceState.BUSY):
                 out["busy"] += 1
+            elif rec.state is DeviceState.RELEASING:
+                out["releasing"] += 1
             elif rec.state is DeviceState.ERROR:
                 out["error"] += 1
             else:

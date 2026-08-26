@@ -20,12 +20,17 @@ port = 8760
 # no error channel, so the reason goes out in the relay's own comment syntax:
 # clients that skip "#" lines are unaffected, humans on netcat get an answer.
 # Set to "" to close with zero bytes instead.
-reject_message = "# ERROR: no relay available ({total} devices, {busy} busy)"
+reject_message = "# ERROR: no relay available ({total} devices, {busy} in use, {releasing} being handed back)"
 
 # 0 = reject immediately. Releasing a board takes 2-3s (close, reopen to reset,
 # confirm, restore, verify), so a client that reconnects the instant it
 # disconnects can be refused. Raise this for test harnesses that do that.
 acquire_wait_ms = 0
+
+# Prepend "# session <id>" so a client can correlate its socket with
+# `mbrelay status` / `mbrelay kick`. Off by default: a real serial port never
+# sends it, and byte-for-byte equivalence is the point of the service.
+announce_session = false
 
 # banner: replay the board's announcement first, as a direct serial open would
 # none:   send nothing; the client sends HELLO itself

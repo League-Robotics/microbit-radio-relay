@@ -37,6 +37,10 @@ serial open would give you.
 When you disconnect, the server resets the board and restores those defaults
 before anyone else can have it.
 
+You do not choose which board you get, and it is **not** the same one each time:
+the pool hands out the least-recently-used board, so repeated connects rotate
+through them. Read the banner to see which you got.
+
 That last part is why this is a service rather than a `socat` one-liner. The
 relay firmware **persists its configuration in flash** across resets and
 power-cycles (see the [Protocol Reference](protocol)), so a board someone left on
@@ -69,11 +73,31 @@ s.sendall(b"!GO\n")           # from here every byte is radio payload
 s.sendall(b"hello over the radio")
 ```
 
-Set `TCP_NODELAY`. Without it, Nagle adds about 40 ms to every small write, which
-roughly doubles the observed radio round-trip.
+Set `TCP_NODELAY`. Nagle delays small writes that follow one another closely,
+which can add tens of milliseconds to a radio round-trip. If you pace your
+writes a few hundred milliseconds apart you will not notice the difference —
+but it costs nothing to set, and it matters as soon as you send back-to-back.
 
 Ask your fleet administrator for the host and port. They are recorded on the
 internal wiki, not here.
+
+## You do not always need `!GO`
+
+`!GO` is a one-way door — the only way back to the command plane is to
+disconnect and reconnect. For a single query that is a heavy way to do it, and
+the command plane can already reach the radio:
+
+```
+> ping            # send one line over the radio, no !GO needed
+< pong            # anything received arrives on a "<" line
+```
+
+`HELLO` re-requests the board's announcement at any time, which is the quick way
+to confirm which board you are holding.
+
+Use `!GO` when you want a transparent byte stream; use `>` for one-shot
+request/response, which covers most interactive use. `!HELP` on the board lists
+the rest of the grammar.
 
 ## Three things that will catch you out
 
@@ -83,12 +107,13 @@ escape: once you send `!GO`, a reset is the *only* way back to the command plane
 The substitute is to **disconnect and reconnect** — and since the server resets
 and re-verifies on every bind, the reconnect lands on a freshly clean board.
 
-**Reconnecting instantly may be refused.** Releasing a board takes two to three
+**Reconnecting instantly may be refused when the pool is full.** Releasing a board takes two to three
 seconds: the server has to close the port, reopen it (which is what resets the
-board), confirm the command plane, restore the settings and verify them. If your
-script disconnects and immediately reconnects, its old board is still being
-cleaned up. Wait a moment, or ask for the server's `acquire_wait_ms` to be raised
-so the connect blocks instead of failing.
+board), confirm the command plane, restore the settings and verify them. If your script disconnects and immediately reconnects it normally gets a
+*different* board and succeeds — the problem only appears when every other
+board is taken and it needs its own back. Wait a moment, or ask for the
+server's `acquire_wait_ms` to be raised so the connect blocks instead of
+failing.
 
 **There is no flow control.** Writing flat out at 115200 will overrun the board's
 USB receive buffer, because the radio is much slower than the serial link. That
@@ -103,13 +128,18 @@ comment syntax and then closes the connection:
 
 ```
 $ nc <host> <port>
-# ERROR: no relay available (4 devices, 4 busy)
+# ERROR: no relay available (4 devices, 3 in use, 1 being handed back)
 $
 ```
 
 Any client that already ignores `#` lines — which is any client written against
 the relay protocol — is unaffected, and a human gets a readable answer instead of
 a silent hang-up.
+
+Note the two counts. A board that is *in use* is held by another client; a board
+*being handed back* is mid-reset and belongs to nobody — it will be free in a
+second or two. Lumping them together made it look as though a colleague had a
+board when nobody did.
 
 ## Running one
 
@@ -142,6 +172,24 @@ hardware or flash failure.
 On the League fleet the server is installed by Ansible and runs under systemd, so
 `systemctl status mbrelay` and `journalctl -u mbrelay` are the first things to
 try when something looks wrong.
+
+## The radio is shared — check your channel
+
+Four boards means four simultaneous users, and they all transmit into the same
+air. **Two clients that pick the same channel will hear each other's robots, and
+each robot will act on the other's commands.** Nothing in the service prevents
+this: a shared channel is sometimes exactly what you want, and the data plane is
+a transparent pipe with no place to interpose.
+
+What the server does do is make it visible. The channel each client selects shows
+up in `mbrelay status`, and a collision is logged:
+
+```
+channel_collision channel=4 sessions=s-2(10.0.0.9:52344), s-5(10.0.0.14:41022)
+```
+
+If you are driving a robot, agree a channel with whoever else is using the pool,
+and check `mbrelay status` before you start.
 
 ## If a board stops answering
 
