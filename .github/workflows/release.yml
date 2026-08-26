@@ -1,0 +1,105 @@
+name: Release
+
+# Publishes the two things a fleet node needs, as assets on a tagged release:
+#   MICROBIT.hex                     -- the relay firmware
+#   microbit_relayd-*.whl / .tar.gz  -- the server
+# The Ansible role in ros-deploy fetches both by tag, so this workflow is what
+# makes a deploy possible at all.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach assets to'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  firmware:
+    runs-on: ubuntu-22.04
+    name: build MICROBIT.hex
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Setup arm-none-eabi-gcc
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: latest
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+      - name: Install Ninja
+        run: python -m pip install ninja
+      - name: Build the firmware
+        run: python build.py
+      - name: Record what went into this image
+        run: |
+          {
+            echo "commit: ${{ github.sha }}"
+            echo "built:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "sha256: $(sha256sum MICROBIT.hex | cut -d' ' -f1)"
+            echo
+            echo "codal.json config:"
+            python -c "import json;print(json.dumps(json.load(open('codal.json'))['config'],indent=2))"
+          } > MICROBIT.hex.txt
+          cat MICROBIT.hex.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: |
+            MICROBIT.hex
+            MICROBIT.hex.txt
+
+  python:
+    runs-on: ubuntu-latest
+    name: build the server distribution
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --upgrade pip build
+      - name: Run the hardware-free tests before publishing anything
+        working-directory: server
+        run: |
+          pip install -e '.[dev]'
+          pytest -m 'not hil' -q
+      - run: python -m build server/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: server/dist/*
+
+  publish:
+    needs: [firmware, python]
+    runs-on: ubuntu-latest
+    name: attach assets to the release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: firmware
+          path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: assets
+      - name: List what will be published
+        run: ls -l assets
+      - name: Create or update the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes
+          fi
+          # --clobber so re-running the workflow replaces assets rather than failing.
+          gh release upload "$TAG" assets/* --clobber

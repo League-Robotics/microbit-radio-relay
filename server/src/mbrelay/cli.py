@@ -1,0 +1,512 @@
+"""``mbrelay`` -- run the daemon, inspect it, and flash boards.
+
+One binary with subcommands, mirroring the sibling ``mbdeploy``, so config and
+socket resolution are written once instead of drifting between two entry points.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+import time
+
+from . import __version__
+from .adminclient import AdminClient
+from .config import load as load_config
+from .errors import (EXIT_ERROR, EXIT_HARDWARE, EXIT_NO_DAEMON, EXIT_NO_DEVICE,
+                     EXIT_OK, EXIT_USAGE, AdminError, ConfigError, DaemonNotRunning,
+                     MbrelayError)
+
+
+# ---------------------------------------------------------------------------
+# argument parsing
+# ---------------------------------------------------------------------------
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="mbrelay",
+        description="Serve USB-attached micro:bit radio relays over TCP.")
+    p.add_argument("--config", metavar="PATH", help="config file (skips the search path)")
+    p.add_argument("--socket", metavar="PATH", help="admin socket path")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    p.add_argument("-v", "--verbose", action="count", default=0)
+    p.add_argument("-q", "--quiet", action="store_true")
+    p.add_argument("--version", action="version", version=f"mbrelay {__version__}")
+    sub = p.add_subparsers(dest="command", metavar="COMMAND")
+
+    s = sub.add_parser("serve", help="run the daemon in the foreground")
+    s.add_argument("--bind", metavar="ADDR")
+    s.add_argument("--port", type=int)
+    s.add_argument("--log-level", choices=["debug", "info", "warning", "error"])
+    s.add_argument("--log-format", choices=["text", "json"])
+    s.set_defaults(func=cmd_serve)
+
+    for name, help_text in (("devices", "list attached relays"), ("list", None)):
+        d = sub.add_parser(name, help=help_text)
+        d.add_argument("--refresh", action="store_true",
+                       help="re-probe idle boards (never touches a busy one)")
+        d.add_argument("--all", action="store_true", help="include departed boards")
+        d.set_defaults(func=cmd_devices)
+
+    st = sub.add_parser("status", help="daemon status and live sessions")
+    st.add_argument("--watch", nargs="?", type=float, const=2.0, metavar="SEC")
+    st.set_defaults(func=cmd_status)
+
+    sub.add_parser("sessions", help="list live sessions").set_defaults(func=cmd_sessions)
+
+    k = sub.add_parser("kick", help="terminate a session")
+    k.add_argument("session", nargs="?")
+    k.add_argument("--device", metavar="NAME")
+    k.add_argument("--all", action="store_true")
+    k.add_argument("--reason", default="operator")
+    k.set_defaults(func=cmd_kick)
+
+    r = sub.add_parser("reset", help="reset a board to factory defaults")
+    r.add_argument("device", nargs="?")
+    r.add_argument("--all", action="store_true")
+    r.add_argument("--force", action="store_true", help="kick a session holding it")
+    r.set_defaults(func=cmd_reset)
+
+    for name, fn in (("disable", cmd_disable), ("enable", cmd_enable)):
+        e = sub.add_parser(name, help=f"{name} a board")
+        e.add_argument("device")
+        e.add_argument("--reason", default="operator")
+        e.set_defaults(func=fn)
+
+    rs = sub.add_parser("rescan", help="re-scan USB now")
+    rs.add_argument("--force", action="store_true", help="discard cached identity")
+    rs.set_defaults(func=cmd_rescan)
+
+    ev = sub.add_parser("events", help="stream daemon events")
+    ev.add_argument("--follow", action="store_true", default=True)
+    ev.set_defaults(func=cmd_events)
+
+    sub.add_parser("ping", help="is the daemon up?").set_defaults(func=cmd_ping)
+
+    f = sub.add_parser("flash", help="reflash relay firmware via mbdeploy")
+    f.add_argument("device", nargs="?", help="board name or UID")
+    f.add_argument("--all-relays", action="store_true", help="every attached board")
+    f.add_argument("--hex", metavar="PATH")
+    f.add_argument("--yes", "-y", action="store_true", help="skip the confirmation")
+    f.set_defaults(func=cmd_flash)
+
+    c = sub.add_parser("connect", help="open a terminal on a served relay")
+    c.add_argument("target", nargs="?", default="127.0.0.1:8760",
+                   help="HOST:PORT (default 127.0.0.1:8760)")
+    c.add_argument("--send", action="append", default=[], metavar="LINE")
+    c.add_argument("--expect", metavar="REGEX")
+    c.add_argument("--timeout", type=float, default=10.0)
+    c.add_argument("--raw", action="store_true", default=True)
+    c.add_argument("--escape", default="]", metavar="CHAR")
+    c.add_argument("--log", metavar="FILE")
+    c.set_defaults(func=cmd_connect)
+
+    cf = sub.add_parser("config", help="inspect the merged configuration")
+    cf.add_argument("action", nargs="?", default="show", choices=["show"])
+    cf.set_defaults(func=cmd_config)
+
+    iu = sub.add_parser("install-unit", help="print a systemd unit and udev rule")
+    iu.add_argument("--print", dest="do_print", action="store_true", default=True)
+    iu.set_defaults(func=cmd_install_unit)
+
+    return p
+
+
+# ---------------------------------------------------------------------------
+# helpers
+# ---------------------------------------------------------------------------
+def _config(args):
+    overrides = {}
+    for flag, dotted in (("bind", "server.bind"), ("port", "server.port"),
+                         ("log_level", "log.level"), ("log_format", "log.format"),
+                         ("socket", "admin.socket")):
+        if (value := getattr(args, flag, None)) is not None:
+            overrides[dotted] = value
+    if args.verbose >= 2:
+        overrides["log.level"] = "debug"
+    elif args.verbose == 1:
+        overrides.setdefault("log.level", "info")
+    if args.quiet:
+        overrides["log.level"] = "error"
+    return load_config(args.config, overrides=overrides)
+
+
+def _client(args) -> AdminClient:
+    cfg = _config(args)
+    path = args.socket or os.environ.get("MBRELAY_SOCKET") or cfg.admin.socket
+    return AdminClient(path)
+
+
+def _emit(args, payload: dict) -> None:
+    print(json.dumps(payload, indent=2, default=str))
+    _ = args
+
+
+def _table(rows: list[list[str]], headers: list[str]) -> str:
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(str(cell)))
+    line = "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip()
+    out = [line, "  ".join("-" * widths[i] for i in range(len(headers)))]
+    for row in rows:
+        out.append("  ".join(str(c).ljust(widths[i]) for i, c in enumerate(row)).rstrip())
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# commands
+# ---------------------------------------------------------------------------
+def cmd_serve(args) -> int:
+    from .logs import setup as setup_logging
+    from .server import Daemon
+
+    cfg = _config(args)
+    setup_logging(cfg.log.level, cfg.log.format)
+    try:
+        return asyncio.run(Daemon(cfg).run())
+    except KeyboardInterrupt:
+        return EXIT_OK
+    except AdminError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+def cmd_devices(args) -> int:
+    cfg = _config(args)
+    try:
+        with _client(args) as client:
+            if args.refresh:
+                client.call("rescan", force=False)
+                time.sleep(1.5)
+            result = client.call("list", all=args.all)
+        rows = result["devices"]
+    except DaemonNotRunning:
+        # Work without the daemon, so you can see the hardware before starting it.
+        rows = _local_scan(cfg)
+        if not args.json:
+            print("(daemon not running -- showing a direct USB scan)", file=sys.stderr)
+    except AdminError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+    if args.json:
+        _emit(args, {"devices": rows})
+        return EXIT_OK
+    if not rows:
+        print("no micro:bits found")
+        return EXIT_OK
+    print(_table(
+        [[r.get("name", "?"), r.get("state", "?"), r.get("role") or "-",
+          r.get("port") or "-", r.get("session") or "-",
+          r.get("short_uid") or r["uid"][16:24]] for r in rows],
+        ["NAME", "STATE", "ROLE", "PORT", "SESSION", "UID"]))
+    return EXIT_OK
+
+
+def _local_scan(cfg) -> list[dict]:
+    from .transport import scan_ports
+    labels = cfg.devices.labels
+    return [{"uid": uid, "port": info.device, "state": "unknown",
+             "short_uid": uid[16:24],
+             "name": labels.get(uid) or uid[16:24], "role": "", "session": None}
+            for uid, info in sorted(scan_ports().items())]
+
+
+def cmd_status(args) -> int:
+    def once() -> dict:
+        with _client(args) as client:
+            return client.call("status")
+
+    try:
+        while True:
+            status = once()
+            if args.json:
+                _emit(args, status)
+                return EXIT_OK
+            d = status["devices"]
+            listener = status["listeners"][0]
+            if args.watch:
+                print("\033[2J\033[H", end="")
+            print(f"mbrelay {status['version']}  pid {status['pid']}  "
+                  f"up {status['uptime_s']:.0f}s")
+            print(f"listening {listener['addr']}  "
+                  f"accepted {listener['accepted']}  rejected {listener['rejected']}")
+            print(f"devices: {d['total']} total, {d['free']} free, "
+                  f"{d['busy']} busy, {d['error']} error")
+            if status["sessions"]:
+                print()
+                print(_table(
+                    [[s["id"], s["device_name"], s["peer"], s["plane"],
+                      f"{s['age_s']:.0f}s", s["rx_bytes"], s["tx_bytes"]]
+                     for s in status["sessions"]],
+                    ["SESSION", "DEVICE", "PEER", "PLANE", "AGE", "RX", "TX"]))
+            else:
+                print("no active sessions")
+            if not args.watch:
+                return EXIT_OK
+            time.sleep(args.watch)
+    except KeyboardInterrupt:
+        return EXIT_OK
+    except DaemonNotRunning as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_NO_DAEMON
+    except AdminError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+def cmd_sessions(args) -> int:
+    return _simple(args, "sessions", lambda r: (
+        _table([[s["id"], s["device_name"], s["peer"], s["plane"],
+                 f"{s['age_s']:.0f}s", s["rx_bytes"], s["tx_bytes"]]
+                for s in r["sessions"]],
+               ["SESSION", "DEVICE", "PEER", "PLANE", "AGE", "RX", "TX"])
+        if r["sessions"] else "no active sessions"))
+
+
+def cmd_kick(args) -> int:
+    return _simple(args, "kick",
+                   lambda r: f"kicked: {', '.join(r['kicked']) or '(nothing)'}",
+                   session=args.session, device=args.device,
+                   all=args.all or None, reason=args.reason)
+
+
+def cmd_reset(args) -> int:
+    if not args.device and not args.all:
+        print("mbrelay: reset needs a device name or --all", file=sys.stderr)
+        return EXIT_USAGE
+    return _simple(args, "reset",
+                   lambda r: f"resetting: {', '.join(r['scheduled'])}",
+                   device=args.device, all=args.all or None, force=args.force or None)
+
+
+def cmd_disable(args) -> int:
+    return _simple(args, "disable", lambda r: f"disabled {r['device']['name']}",
+                   device=args.device, reason=args.reason)
+
+
+def cmd_enable(args) -> int:
+    return _simple(args, "enable", lambda r: f"enabled {r['device']['name']}",
+                   device=args.device)
+
+
+def cmd_rescan(args) -> int:
+    return _simple(args, "rescan", lambda r: "rescan scheduled",
+                   force=args.force or None)
+
+
+def cmd_ping(args) -> int:
+    try:
+        with _client(args) as client:
+            result = client.call("ping")
+    except DaemonNotRunning:
+        if not args.json:
+            print("mbrelay: not running", file=sys.stderr)
+        return EXIT_NO_DAEMON
+    if args.json:
+        _emit(args, result)
+    else:
+        print(f"mbrelay {result['version']}: running")
+    return EXIT_OK
+
+
+def cmd_events(args) -> int:
+    try:
+        with _client(args) as client:
+            for event in client.events():
+                if args.json:
+                    print(json.dumps(event, default=str), flush=True)
+                else:
+                    ts = time.strftime("%H:%M:%S", time.localtime(event.get("ts", 0)))
+                    print(f"{ts} {event.get('event')} {event.get('data')}", flush=True)
+    except KeyboardInterrupt:
+        return EXIT_OK
+    except DaemonNotRunning as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_NO_DAEMON
+    return EXIT_OK
+
+
+def _simple(args, cmd: str, render, **kwargs) -> int:
+    try:
+        with _client(args) as client:
+            result = client.call(cmd, **kwargs)
+    except DaemonNotRunning as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_NO_DAEMON
+    except AdminError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_NO_DEVICE if exc.code == "not_found" else EXIT_ERROR
+    if args.json:
+        _emit(args, result)
+    else:
+        print(render(result))
+    return EXIT_OK
+
+
+def cmd_flash(args) -> int:
+    from .firmware import FlashError, Flasher
+    from .transport import scan_ports
+
+    cfg = _config(args)
+    flasher = Flasher(cfg)
+    try:
+        flasher.check()
+        hex_path = flasher.resolve_hex(args.hex)
+        flasher.pyocd_cwd()
+    except FlashError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_HARDWARE
+
+    attached = scan_ports()
+    if args.all_relays:
+        targets = sorted(attached)
+    elif args.device:
+        targets = [uid for uid in attached
+                   if args.device.lower() in (uid.lower(), uid[16:24].lower())]
+        if not targets:
+            targets = _resolve_by_name(args, attached)
+        if not targets:
+            print(f"mbrelay: no attached board matching {args.device!r}", file=sys.stderr)
+            return EXIT_NO_DEVICE
+    else:
+        print("mbrelay: flash needs a device name/UID or --all-relays", file=sys.stderr)
+        return EXIT_USAGE
+
+    if not targets:
+        print("mbrelay: no micro:bits attached", file=sys.stderr)
+        return EXIT_NO_DEVICE
+
+    print(f"Flashing {len(targets)} board(s) with {hex_path}")
+    if not args.yes and sys.stdin.isatty():
+        if input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
+            return EXIT_OK
+
+    # Take the boards out of rotation first, so the daemon does not open a port
+    # mid-flash. Best-effort: flashing from a host with no daemon is normal.
+    disabled = _quiesce(args, targets)
+    try:
+        flasher.probe()
+        results = [flasher.deploy(uid, hex_path) for uid in targets]
+    except FlashError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_HARDWARE
+    finally:
+        _unquiesce(args, disabled)
+
+    for result in results:
+        print(f"  {'ok  ' if result.ok else 'FAIL'} {result.uid[-12:]} {result.message}")
+    failed = [r for r in results if not r.ok]
+    if args.json:
+        _emit(args, {"results": [r.__dict__ for r in results]})
+    return EXIT_HARDWARE if failed else EXIT_OK
+
+
+def _resolve_by_name(args, attached: dict) -> list[str]:
+    try:
+        with _client(args) as client:
+            rows = client.call("list", all=True)["devices"]
+    except MbrelayError:
+        return []
+    return [r["uid"] for r in rows
+            if r["uid"] in attached and args.device.lower() in
+            {r.get("name", "").lower(), r.get("device_name", "").lower()}]
+
+
+def _quiesce(args, uids: list[str]) -> list[str]:
+    done = []
+    try:
+        with _client(args) as client:
+            for uid in uids:
+                try:
+                    client.call("kick", device=uid, reason="flash")
+                    client.call("disable", device=uid, reason="flashing")
+                    done.append(uid)
+                except AdminError:
+                    pass
+    except MbrelayError:
+        pass
+    return done
+
+
+def _unquiesce(args, uids: list[str]) -> None:
+    if not uids:
+        return
+    try:
+        with _client(args) as client:
+            for uid in uids:
+                try:
+                    client.call("enable", device=uid)
+                except AdminError:
+                    pass
+            client.call("rescan", force=True)
+    except MbrelayError:
+        pass
+
+
+def cmd_connect(args) -> int:
+    from .client import connect, interactive, parse_target, run_script
+
+    host, port = parse_target(args.target)
+    try:
+        sock = connect(host, port)
+    except OSError as exc:
+        print(f"mbrelay: cannot connect to {host}:{port}: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+    if args.send or args.expect:
+        try:
+            return run_script(sock, args.send, args.expect, args.timeout)
+        finally:
+            sock.close()
+    return interactive(sock, escape=args.escape, raw=args.raw, log_path=args.log)
+
+
+def cmd_config(args) -> int:
+    cfg = _config(args)
+    if args.json:
+        _emit(args, {"config": cfg.as_dict(), "sources": cfg.sources})
+        return EXIT_OK
+    for section, values in cfg.as_dict().items():
+        print(f"[{section}]")
+        for key, value in values.items():
+            source = cfg.sources.get(f"{section}.{key}", "default")
+            print(f"  {key:<22} {value!r:<40} # {source}")
+        print()
+    return EXIT_OK
+
+
+def cmd_install_unit(args) -> int:
+    from .packaging_assets import SYSTEMD_UNIT, UDEV_RULE
+    print("# ---- /etc/systemd/system/mbrelay.service ----")
+    print(SYSTEMD_UNIT)
+    print("# ---- /etc/udev/rules.d/99-microbit-relay.rules ----")
+    print(UDEV_RULE)
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        parser.print_help()
+        return EXIT_USAGE
+    try:
+        return args.func(args)
+    except ConfigError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+    except BrokenPipeError:
+        return EXIT_OK
+    except KeyboardInterrupt:
+        return EXIT_OK
+    except MbrelayError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_ERROR
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -38,6 +38,11 @@ The relay has two operating **planes**, and it always boots into the first one:
 
 See the [Protocol Reference](protocol) for the full grammar and framing.
 
+If the board you want is plugged into a different machine, the
+[Relay Server](relay-server) hands relays out over TCP: the socket behaves
+exactly like a local serial port, and every client gets a board reset to
+factory defaults.
+
 ## The two radio modes
 
 A single firmware speaks to two different kinds of peer; it switches the on-air

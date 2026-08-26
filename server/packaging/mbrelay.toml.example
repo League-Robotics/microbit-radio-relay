@@ -1,0 +1,75 @@
+# Example mbrelay configuration.
+#
+# Search order, lowest precedence first:
+#   /etc/mbrelay/mbrelay.toml
+#   /etc/mbrelay/conf.d/*.toml
+#   $XDG_CONFIG_HOME/mbrelay/mbrelay.toml
+#   ./mbrelay.toml
+#   MBRELAY_* environment variables
+#   command-line flags
+#
+# `mbrelay config show` prints the merged result and which layer won each key.
+# Unknown keys are a startup ERROR, not a warning -- a typo here must not leave
+# the service running with a silently different setting.
+
+[server]
+bind = "0.0.0.0"
+port = 8760
+
+# Sent (plus CRLF) before the socket closes when nothing is free. A byte pipe has
+# no error channel, so the reason goes out in the relay's own comment syntax:
+# clients that skip "#" lines are unaffected, humans on netcat get an answer.
+# Set to "" to close with zero bytes instead.
+reject_message = "# ERROR: no relay available ({total} devices, {busy} busy)"
+
+# 0 = reject immediately. Releasing a board takes 2-3s (close, reopen to reset,
+# confirm, restore, verify), so a client that reconnects the instant it
+# disconnects can be refused. Raise this for test harnesses that do that.
+acquire_wait_ms = 0
+
+# banner: replay the board's announcement first, as a direct serial open would
+# none:   send nothing; the client sends HELLO itself
+# raw:    forward every setup byte, normalize echoes included (debug only)
+preamble = "banner"
+
+# Reap clients whose laptop went to sleep instead of letting them hold a relay.
+keepalive = true
+
+[devices]
+# Empty allow list means every micro:bit found. Both accept UIDs or names.
+allow = []
+deny = []
+
+# Only the C++/CODAL relay firmware can be driven. The older MakeCode RADIORELAY
+# boards announce themselves too, but do not accept !ECHO ON / !MODE, so the
+# daemon cannot verify it restored a known state.
+allow_roles = ["RADIOBRIDGE"]
+
+# [devices.labels]
+# Friendly names keyed by DAPLink UID. Careful: the UID's *tail* is the interface
+# chip and is identical across boards from the same batch -- the distinguishing
+# field is in the middle. `mbrelay devices` prints it.
+# "9906360200052820b8e12372c44f4f67000000006e052820" = "bench-1"
+
+[admin]
+socket = "/run/mbrelay/mbrelay.sock"
+socket_mode = "0660"
+# socket_group = "mbrelay"     # operators join this group to run admin commands
+allow_shutdown = false          # systemd owns the lifecycle; use systemctl
+
+[firmware]
+# Only needed for `mbrelay flash`; the daemon itself never touches these.
+hex = "/opt/microbit-relay/MICROBIT.hex"
+# Directory holding pyocd.yaml with `chip_erase: chip`. pyocd reads it from its
+# cwd, and without it a sector erase fails on the nRF52833 MBR region at 0x0.
+pyocd_config = "/opt/microbit-relay/pyocd.yaml"
+
+[state]
+dir = "/var/lib/mbrelay"
+# The systemd unit's TimeoutStopSec must exceed this, or systemd kills the
+# daemon while it is still restoring boards to factory defaults.
+shutdown_grace_s = 20
+
+[log]
+level = "info"
+format = "text"                 # "json" for log shippers

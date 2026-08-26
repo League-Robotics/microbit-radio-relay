@@ -835,8 +835,8 @@ namespace
         comment("!CG <ch> <group>   set channel 0-83 and group 0-255");
         comment("!RC <ch> <group>   alias of !CG");
         comment("!P <0-7>           set transmit power");
-        comment("!MODE MAKECODE     32-byte CODAL string framing (default)");
-        comment("!MODE RAW250       headerless framing for matching firmware");
+        comment("!MODE MAKECODE     32-byte CODAL string framing");
+        comment("!MODE RAW250       headerless framing, matching firmware (default)");
         comment("!FRAG ON|OFF       MAKECODE over-length: fragment vs truncate");
         comment("!ECHO [ON|OFF]     transponder: bounce received msgs back");
         comment("!DEFAULTS          clear saved config (defaults next reset)");
