@@ -16,3 +16,6 @@ buildcache.json
 *.pyc
 .venv
 __pycache__
+
+# Personal Claude Code settings (machine-specific paths; not for the team)
+.claude/settings.local.json
