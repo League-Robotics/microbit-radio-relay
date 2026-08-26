@@ -16,7 +16,7 @@ import time
 
 from . import __version__
 from .admin import AdminServer
-from .errors import NoFreeDevice
+from .errors import MbrelayError, NoFreeDevice
 from .inventory import Inventory
 from .relay import RelayControl
 from .session import SessionManager
@@ -179,9 +179,19 @@ class Daemon:
             self.conns_total += 1
             return RelayProtocol(self)
 
-        self.server = await loop.create_server(
-            factory, self.cfg.server.bind, self.cfg.server.port,
-            backlog=self.cfg.server.backlog, reuse_address=True)
+        try:
+            self.server = await loop.create_server(
+                factory, self.cfg.server.bind, self.cfg.server.port,
+                backlog=self.cfg.server.backlog, reuse_address=True)
+        except OSError as exc:
+            # A bare traceback here is a poor way to learn that something else
+            # already has the port -- typically a daemon left over from a
+            # previous run, or the systemd unit still active.
+            raise MbrelayError(
+                f"cannot listen on {self.cfg.server.bind}:{self.cfg.server.port}: "
+                f"{exc.strerror or exc}. Another mbrelay may already be running "
+                f"(systemctl status mbrelay), or choose a different port."
+            ) from exc
 
         counts = self.inventory.counts()
         log.info("daemon_start version=%s pid=%d", __version__, __import__("os").getpid())

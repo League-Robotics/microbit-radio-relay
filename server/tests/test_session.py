@@ -151,11 +151,25 @@ async def test_release_restores_defaults_and_frees_the_board(manager, factory):
     assert record.session_id is None
 
 
-async def test_release_of_a_vanished_board_does_not_hang(manager, factory):
+async def test_release_of_a_vanished_board_does_not_hang(manager, scanner):
+    """Unplugging mid-session must not leave release trying to talk to nothing.
+
+    The board is removed from the SCANNER, not by poking Inventory.live_uids:
+    the scan loop is running, and it would put a hand-cleared uid straight back
+    -- which is what this test originally did, and it passed on a fast machine
+    only because release happened to win the race.
+    """
     session = await manager.acquire("test:1")
-    manager.inventory.live_uids.discard(session.record.uid)
+    uid = session.record.uid
+
+    del scanner.ports[uid]
+    await manager.inventory.scan_once()
+    assert session.record.state is DeviceState.GONE
+
     await manager.release(session, "device_removed")
     assert session.record.state is DeviceState.GONE
+    assert session.record.port is None
+    assert session.id not in manager.sessions
 
 
 async def test_shutdown_returns_every_board(manager, factory):

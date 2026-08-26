@@ -265,15 +265,26 @@ class Inventory:
             return                       # never probe a board a client is holding
         if not force and time.time() < rec.next_retry_at:
             return
-        task = asyncio.create_task(self._probe(rec), name=f"mbrelay-probe-{rec.uid[-8:]}")
+        # Mark it PROBING *now*, synchronously, before the task even starts.
+        #
+        # The probe body waits on a concurrency semaphore, so on a host with more
+        # boards than probe slots the queued ones would otherwise sit at UNKNOWN
+        # and the next scan would schedule a second probe for the same board --
+        # and a third, and so on. Every probe opens the port, which reboots the
+        # board, so the duplicates reset boards out from under each other and
+        # perfectly good relays came back as "no_firmware". Only visible with
+        # three or more boards, which is exactly the deployed configuration.
+        rec.state = DeviceState.PROBING
+        task = asyncio.create_task(self._probe(rec),
+                                   name=f"mbrelay-probe-{rec.short_uid}")
         self._probe_tasks.add(task)
         task.add_done_callback(self._probe_tasks.discard)
 
     async def _probe(self, rec: DeviceRecord) -> None:
         async with self._probe_sem:
-            if rec.state in IN_USE or rec.port is None:
+            if rec.port is None:
+                rec.state = DeviceState.GONE
                 return
-            rec.state = DeviceState.PROBING
             try:
                 banner = await self._prober(rec)
             except Exception as exc:

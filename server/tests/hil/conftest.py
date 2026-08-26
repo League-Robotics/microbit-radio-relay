@@ -62,9 +62,22 @@ def daemon(attached):
     proc = subprocess.Popen([sys.executable, "-m", "mbrelay.cli",
                              "--config", str(config), "serve"],
                             stdout=logfile, stderr=subprocess.STDOUT)
+    def die_if_dead(stage: str) -> None:
+        """Surface the daemon's own error instead of a 60-second timeout.
+
+        Without this, a daemon that exits at startup (port in use, bad config)
+        looks identical to hardware that never came ready.
+        """
+        if proc.poll() is None:
+            return
+        logfile.flush()
+        tail = (workdir / "daemon.log").read_text()[-1500:]
+        raise RuntimeError(
+            f"the daemon exited during {stage} (rc={proc.returncode}):\n{tail}")
+
     try:
-        _wait_for_port(PORT, timeout=45)
-        _wait_for_free(workdir / "s.sock", want=2, timeout=60)
+        _wait_for_port(PORT, timeout=45, alive=die_if_dead)
+        _wait_for_free(workdir / "s.sock", want=2, timeout=60, alive=die_if_dead)
         yield {"port": PORT, "socket": str(workdir / "s.sock"),
                "log": workdir / "daemon.log", "config": str(config)}
     finally:
@@ -76,9 +89,10 @@ def daemon(attached):
         logfile.close()
 
 
-def _wait_for_port(port: int, timeout: float) -> None:
+def _wait_for_port(port: int, timeout: float, alive=lambda stage: None) -> None:
     end = time.time() + timeout
     while time.time() < end:
+        alive("startup")
         try:
             socket.create_connection(("127.0.0.1", port), timeout=1).close()
             return
@@ -87,10 +101,12 @@ def _wait_for_port(port: int, timeout: float) -> None:
     raise RuntimeError(f"daemon never listened on {port}")
 
 
-def _wait_for_free(sock_path, want: int, timeout: float) -> None:
+def _wait_for_free(sock_path, want: int, timeout: float,
+                   alive=lambda stage: None) -> None:
     from mbrelay.adminclient import AdminClient
     end = time.time() + timeout
     while time.time() < end:
+        alive("device discovery")
         try:
             client = AdminClient(str(sock_path))
             free = client.call("status")["devices"]["free"]

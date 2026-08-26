@@ -198,7 +198,10 @@ def cmd_serve(args) -> int:
         return asyncio.run(Daemon(cfg).run())
     except KeyboardInterrupt:
         return EXIT_OK
-    except AdminError as exc:
+    except MbrelayError as exc:
+        # Startup problems (port in use, socket path too long, another daemon
+        # already running) are operator errors, not crashes. One line, not a
+        # traceback -- this is what shows up in `journalctl -u mbrelay`.
         print(f"mbrelay: {exc}", file=sys.stderr)
         return EXIT_ERROR
 

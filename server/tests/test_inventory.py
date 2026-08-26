@@ -208,3 +208,42 @@ async def test_a_busy_board_is_never_probed(inventory, factory):
     inventory.rescan(force=True)
     await asyncio.sleep(0.1)
     assert factory.boards[PORT_A].boot_count == before
+
+
+async def test_more_boards_than_probe_slots_probes_each_exactly_once(cfg, factory,
+                                                                     scanner):
+    """A board queued behind the concurrency semaphore must not be re-scheduled.
+
+    Probing opens the port, which reboots the board. With more boards than probe
+    slots the queued ones stayed UNKNOWN, so each scan queued another probe for
+    them -- boards reset each other mid-HELLO and healthy relays reported
+    no_firmware. Only reproducible with three or more boards, which is what the
+    fleet host actually has.
+    """
+    import dataclasses
+
+    from mbrelay.transport import PortInfo
+    from fake_relay import FakeRelayFirmware
+
+    for n in range(4):
+        uid = f"99063602000528{n:02d}cafe2372c44f4f67000000006e052820"
+        port = f"/dev/fake-{n}"
+        scanner.ports[uid] = PortInfo(uid=uid, device=port, description="fake")
+        # Slow enough that later boards genuinely queue on the semaphore.
+        factory.boards[port] = FakeRelayFirmware(name=f"brd{n}", serial=str(n))
+    factory.kwargs["latency"] = 0.05
+
+    cfg = dataclasses.replace(cfg, devices=dataclasses.replace(
+        cfg.devices, max_concurrent_probes=1, scan_interval_ms=20))
+    control = RelayControl(cfg)
+    inv = Inventory(cfg, scanner, prober=lambda r: control.probe(factory, r.port))
+    await inv.start()
+    await _settle(inv, timeout=15.0)
+    try:
+        assert all(r.state is DeviceState.FREE for r in inv.records.values()), \
+            {r.name: str(r.state) for r in inv.records.values()}
+        for port, board in factory.boards.items():
+            assert board.boot_count == 1, (
+                f"{port} was probed {board.boot_count} times; each probe reboots it")
+    finally:
+        await inv.stop()

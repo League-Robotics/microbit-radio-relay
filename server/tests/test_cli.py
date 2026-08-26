@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 
 from mbrelay.cli import build_parser, main
-from mbrelay.errors import (EXIT_HARDWARE, EXIT_NO_DAEMON, EXIT_NO_DEVICE,
-                            EXIT_OK, EXIT_USAGE)
+from mbrelay.errors import (EXIT_ERROR, EXIT_HARDWARE, EXIT_NO_DAEMON,
+                            EXIT_NO_DEVICE, EXIT_OK, EXIT_USAGE)
 from mbrelay.firmware import FlashError, Flasher
 
 
@@ -210,3 +210,28 @@ def test_flash_result_names_the_board_not_the_interface_chip():
     a = FlashResult(uid="9906360200052820aaaa2372c44f4f67000000006e052820", name="", ok=True)
     b = FlashResult(uid="9906360200052820bbbb6c3809a44554000000006e052820", name="", ok=True)
     assert a.short_uid != b.short_uid
+
+
+def test_a_port_already_in_use_is_explained_not_traced(capsys):
+    """`journalctl -u mbrelay` should say what is wrong, not print a traceback.
+
+    A leftover daemon holding the port is the single most common way a restart
+    fails, and the bare OSError from create_server names neither the port nor
+    the likely cause.
+    """
+    import socket
+
+    held = socket.socket()
+    held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    port = held.getsockname()[1]
+    try:
+        code = main(["serve", "--bind", "127.0.0.1", "--port", str(port)])
+    finally:
+        held.close()
+
+    assert code == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "cannot listen on" in err and str(port) in err
+    assert "Traceback" not in err

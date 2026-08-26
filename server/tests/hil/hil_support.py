@@ -12,7 +12,20 @@ import socket
 import time
 
 BANNER_RE = re.compile(rb"DEVICE:(RADIOBRIDGE|RADIORELAY):relay:([^:]+):([0-9A-Fa-f]+)")
-PORT = int(os.environ.get("MBRELAY_HIL_PORT", "8799"))
+def _free_port() -> int:
+    """Ask the OS for a port nobody is using.
+
+    A fixed port meant a daemon left behind by an interrupted run blocked every
+    subsequent one, and the symptom ("fewer than 2 relays became free") pointed
+    at the hardware rather than at the real cause.
+    """
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+PORT = int(os.environ["MBRELAY_HIL_PORT"]) if "MBRELAY_HIL_PORT" in os.environ \
+    else _free_port()
 
 
 def connect(port: int = PORT, timeout: float = 20.0) -> socket.socket:
