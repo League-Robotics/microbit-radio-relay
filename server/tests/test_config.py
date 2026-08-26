@@ -56,4 +56,20 @@ def test_missing_explicit_config_is_fatal(tmp_path):
 def test_derived_paths_are_filled_in():
     cfg = load(environ={})
     assert cfg.state.dir and cfg.admin.socket and cfg.firmware.registry
-    assert cfg.firmware.registry.endswith("devices.json")
+    assert cfg.firmware.registry.endswith("mbdeploy-registry.json")
+
+
+def test_mbdeploy_registry_does_not_collide_with_the_identity_cache(tmp_path):
+    """Two tools, two formats, two files.
+
+    mbrelay writes {"version": 1, "devices": {...}} to <state.dir>/devices.json;
+    mbdeploy expects a flat {uid: {...}} map. Pointing both at one path made
+    mbdeploy crash with "argument of type 'int' is not iterable" the first time
+    a flash was attempted on real hardware.
+    """
+    from pathlib import Path
+
+    cfg = load(overrides={"state.dir": str(tmp_path)}, environ={})
+    identity_cache = Path(cfg.state.dir) / "devices.json"
+    assert Path(cfg.firmware.registry) != identity_cache
+    assert Path(cfg.firmware.registry).parent == Path(cfg.state.dir)

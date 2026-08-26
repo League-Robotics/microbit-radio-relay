@@ -112,7 +112,12 @@ class AdminConfig:
 class FirmwareConfig:
     hex: str = ""
     mbdeploy: str = "mbdeploy"
-    registry: str = ""          # defaults to <state.dir>/devices.json
+    # mbdeploy's OWN device registry. Deliberately NOT <state.dir>/devices.json:
+    # that is mbrelay's identity cache, and the two formats are different --
+    # mbrelay writes {"version": 1, "devices": {...}} while mbdeploy expects a
+    # flat {uid: {...}} map. Sharing the path makes mbdeploy crash on the
+    # "version" key with "argument of type 'int' is not iterable".
+    registry: str = ""          # defaults to <state.dir>/mbdeploy-registry.json
     # Directory containing pyocd.yaml (chip_erase: chip). mbdeploy shells out to
     # pyocd, which reads that file from its cwd -- get it wrong and pyocd
     # silently falls back to sector erase, which fails on the nRF52833 MBR at 0x0.
@@ -320,7 +325,7 @@ def _apply_derived_defaults(cfg: Config, sources: dict[str, str]) -> Config:
 
     state_dir = cfg.state.dir or _default_state_dir()
     admin_sock = cfg.admin.socket or _default_socket_path()
-    registry = cfg.firmware.registry or str(Path(state_dir) / "devices.json")
+    registry = cfg.firmware.registry or str(Path(state_dir) / "mbdeploy-registry.json")
 
     for dotted, value in (("state.dir", state_dir), ("admin.socket", admin_sock),
                           ("firmware.registry", registry)):
