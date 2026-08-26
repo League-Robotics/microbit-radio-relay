@@ -24,17 +24,44 @@ from .errors import (EXIT_ERROR, EXIT_HARDWARE, EXIT_NO_DAEMON, EXIT_NO_DEVICE,
 # ---------------------------------------------------------------------------
 # argument parsing
 # ---------------------------------------------------------------------------
+def _add_global_options(parser: argparse.ArgumentParser, suppress: bool) -> None:
+    """The options that mean the same thing for every subcommand.
+
+    Added twice: once to the top-level parser, and once (via `parents=`) to every
+    subparser. argparse will not accept a parent-parser option that appears AFTER
+    the subcommand, so without the second copy `mbrelay serve --config X` fails
+    with "unrecognized arguments" -- which is exactly how the systemd unit
+    invokes it, and how anyone would naturally type it.
+
+    The subparser copies use SUPPRESS so that an option the user did not give
+    after the subcommand does not overwrite one they gave before it.
+    """
+    def default(value):
+        return argparse.SUPPRESS if suppress else value
+
+    parser.add_argument("--config", metavar="PATH", default=default(None),
+                        help="config file (skips the search path)")
+    parser.add_argument("--socket", metavar="PATH", default=default(None),
+                        help="admin socket path")
+    parser.add_argument("--json", action="store_true", default=default(False),
+                        help="machine-readable output")
+    parser.add_argument("-v", "--verbose", action="count", default=default(0),
+                        help="more logging; repeat for debug")
+    parser.add_argument("-q", "--quiet", action="store_true", default=default(False))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="mbrelay",
         description="Serve USB-attached micro:bit radio relays over TCP.")
-    p.add_argument("--config", metavar="PATH", help="config file (skips the search path)")
-    p.add_argument("--socket", metavar="PATH", help="admin socket path")
-    p.add_argument("--json", action="store_true", help="machine-readable output")
-    p.add_argument("-v", "--verbose", action="count", default=0)
-    p.add_argument("-q", "--quiet", action="store_true")
+    _add_global_options(p, suppress=False)
     p.add_argument("--version", action="version", version=f"mbrelay {__version__}")
-    sub = p.add_subparsers(dest="command", metavar="COMMAND")
+
+    common = argparse.ArgumentParser(add_help=False)
+    _add_global_options(common, suppress=True)
+
+    sub = p.add_subparsers(dest="command", metavar="COMMAND", parser_class=lambda **kw:
+                           argparse.ArgumentParser(parents=[common], **kw))
 
     s = sub.add_parser("serve", help="run the daemon in the foreground")
     s.add_argument("--bind", metavar="ADDR")
@@ -119,23 +146,25 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 def _config(args):
     overrides = {}
+    verbose = getattr(args, "verbose", 0) or 0
     for flag, dotted in (("bind", "server.bind"), ("port", "server.port"),
                          ("log_level", "log.level"), ("log_format", "log.format"),
                          ("socket", "admin.socket")):
         if (value := getattr(args, flag, None)) is not None:
             overrides[dotted] = value
-    if args.verbose >= 2:
+    if verbose >= 2:
         overrides["log.level"] = "debug"
-    elif args.verbose == 1:
+    elif verbose == 1:
         overrides.setdefault("log.level", "info")
-    if args.quiet:
+    if getattr(args, "quiet", False):
         overrides["log.level"] = "error"
-    return load_config(args.config, overrides=overrides)
+    return load_config(getattr(args, "config", None), overrides=overrides)
 
 
 def _client(args) -> AdminClient:
     cfg = _config(args)
-    path = args.socket or os.environ.get("MBRELAY_SOCKET") or cfg.admin.socket
+    path = (getattr(args, "socket", None) or os.environ.get("MBRELAY_SOCKET")
+            or cfg.admin.socket)
     return AdminClient(path)
 
 
@@ -491,6 +520,10 @@ def cmd_install_unit(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    for name, fallback in (("json", False), ("verbose", 0), ("quiet", False),
+                           ("config", None), ("socket", None)):
+        if not hasattr(args, name):
+            setattr(args, name, fallback)
     if not getattr(args, "func", None):
         parser.print_help()
         return EXIT_USAGE

@@ -23,6 +23,40 @@ def test_every_documented_subcommand_parses():
         assert parser.parse_args(argv).func is not None
 
 
+@pytest.mark.parametrize("argv", [
+    ["--socket", "/nope.sock", "ping"],      # globals before the subcommand
+    ["ping", "--socket", "/nope.sock"],      # and after it
+])
+def test_global_options_work_on_either_side_of_the_subcommand(argv):
+    """The systemd unit runs `mbrelay serve --config ...`, i.e. a global option
+    AFTER the subcommand. argparse rejects parent-parser options in that position
+    unless every subparser also declares them -- which it did not, so the service
+    crash-looped with "unrecognized arguments" on first deploy."""
+    assert main(argv) == EXIT_NO_DAEMON
+
+
+def test_serve_accepts_config_after_the_subcommand(capsys):
+    """Reaching the config loader (and failing on a missing file) proves the
+    flag was parsed rather than rejected."""
+    assert main(["serve", "--config", "/nonexistent/mbrelay.toml"]) == EXIT_USAGE
+    assert "not found" in capsys.readouterr().err
+
+
+def test_a_global_given_after_the_subcommand_wins():
+    parser = build_parser()
+    args = parser.parse_args(["--socket", "/before.sock", "ping",
+                              "--socket", "/after.sock"])
+    assert args.socket == "/after.sock"
+
+
+def test_a_global_given_only_before_the_subcommand_survives():
+    """SUPPRESS on the subparser copies is what stops an unspecified option
+    clobbering the one the user gave earlier."""
+    parser = build_parser()
+    args = parser.parse_args(["--socket", "/before.sock", "ping"])
+    assert args.socket == "/before.sock"
+
+
 def test_no_command_is_a_usage_error(capsys):
     assert main([]) == EXIT_USAGE
 

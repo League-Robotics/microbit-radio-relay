@@ -172,8 +172,7 @@ class SessionManager:
                 return await self._bring_up(record, peer)
             except Exception as exc:
                 record.state = DeviceState.ERROR
-                record.last_error = repr(exc)
-                self.inventory._backoff(record)
+                self.inventory.note_error(record, repr(exc))
                 log.error("acquire failed uid=%s port=%s err=%r",
                           record.uid, record.port, exc)
         return None
@@ -248,8 +247,7 @@ class SessionManager:
                 await self.control.reset_and_normalize(self.factory, record.port)
         except Exception as exc:
             record.state = DeviceState.ERROR
-            record.last_error = repr(exc)
-            self.inventory._backoff(record)
+            self.inventory.note_error(record, repr(exc))
             log.error("release_failed uid=%s reason=%s err=%r", record.uid, reason, exc)
             self._schedule_retry(record)
             return

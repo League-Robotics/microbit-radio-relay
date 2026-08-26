@@ -282,7 +282,7 @@ class Inventory:
             rec.last_probe = time.time()
             if banner is None:
                 rec.state = DeviceState.NO_FIRMWARE
-                self._backoff(rec)
+                self.note_error(rec)
                 log.info("device_probed uid=%s result=no_firmware port=%s", rec.uid, rec.port)
                 return
             rec.role, rec.device_name = banner.role, banner.device_name
@@ -300,15 +300,18 @@ class Inventory:
     def _probe_failed(self, rec: DeviceRecord, err: str) -> None:
         rec.state = DeviceState.ERROR
         rec.last_error = err
-        self._backoff(rec)
+        self.note_error(rec)
         log.warning("device_error uid=%s port=%s err=%s", rec.uid, rec.port, err)
 
-    def _backoff(self, rec: DeviceRecord) -> None:
-        """Escalating retry delay.
+    def note_error(self, rec: DeviceRecord, error: str = "") -> None:
+        """Record that an operation on this board failed, and back off.
 
-        A blank board or a robot that is not a relay must not be rebooted every
-        scan cycle, so the delay climbs to five minutes and stays there.
+        A blank board, or a robot that is not a relay, must not be rebooted every
+        scan cycle -- and probing is a reboot -- so the retry delay climbs to
+        five minutes and stays there.
         """
+        if error:
+            rec.last_error = error
         schedule = self.cfg.devices.probe_backoff_ms or (5000,)
         idx = min(rec.error_count, len(schedule) - 1)
         rec.next_retry_at = time.time() + schedule[idx] / 1000
