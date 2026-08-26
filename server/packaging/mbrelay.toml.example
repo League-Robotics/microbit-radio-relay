@@ -27,6 +27,14 @@ reject_message = "# ERROR: no relay available ({total} devices, {busy} in use, {
 # disconnects can be refused. Raise this for test harnesses that do that.
 acquire_wait_ms = 0
 
+# Prefer to hand a returning client a board it had recently, so per-robot work
+# keeps the same hardware and its logs stay comparable. A preference, not a
+# reservation: if the board is taken you get the least-used free one instead.
+# Set false for strict least-used rotation.
+sticky_allocation = true
+sticky_ttl_s = 3600
+sticky_max_clients = 256
+
 # Prepend "# session <id>" so a client can correlate its socket with
 # `mbrelay status` / `mbrelay kick`. Off by default: a real serial port never
 # sends it, and byte-for-byte equivalence is the point of the service.

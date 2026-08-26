@@ -64,6 +64,25 @@ happens on a direct serial connection**, so reproducing it faithfully is correct
 Pace your writes; `scripts/relay_test.py` uses a 10 ms inter-frame gap for exactly
 this reason.
 
+### Which board you get
+
+There is no way to request a specific board, but you usually get **the same one
+back**. The pool remembers which boards each client address used recently and
+prefers them, so per-robot work keeps the same hardware and its logs stay
+comparable across sessions.
+
+It is a preference, not a reservation: if your board is taken you get the
+least-recently-used free one instead, so nothing blocks and wear stays spread
+when nobody has a history.
+
+Affinity is keyed on the client address **without** its source port (every
+connection has a fresh ephemeral port, so keying on it would make affinity
+useless), expires after `server.sticky_ttl_s`, and is capped at
+`server.sticky_max_clients` entries so a public port cannot grow the table
+without bound. Several clients behind one address share an affinity list capped
+at the pool size, so they settle onto different boards rather than fighting over
+one. Set `server.sticky_allocation = false` for strict least-used rotation.
+
 ### The release window
 
 Releasing a board takes two to three seconds — the daemon has to close the port,
@@ -133,7 +152,7 @@ Set `TCP_NODELAY`. Nagle delays small writes that follow one another closely,
 which can add tens of milliseconds to a radio round-trip. Pacing writes a few
 hundred milliseconds apart hides the effect, but it costs nothing to set.
 
-## The radio is shared — check your channel
+### The radio is shared — check your channel
 
 Four boards means four simultaneous users, and they all transmit into the same
 air. **Two clients that pick the same channel will hear each other's robots, and

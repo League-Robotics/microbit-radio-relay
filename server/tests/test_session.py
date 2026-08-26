@@ -363,3 +363,94 @@ async def test_the_session_id_can_be_announced_on_request(cfg, factory, scanner)
         assert b"DEVICE:" in session.preamble
     finally:
         await inventory.stop()
+
+
+async def test_a_returning_client_gets_its_board_back(manager):
+    """Field feedback: round-robin meant per-robot work got a different board
+    every session, so its logs were not comparable. A returning client now gets
+    the board it had, when that board is free."""
+    first = await manager.acquire("10.0.0.9:52344")
+    uid = first.record.uid
+    await manager.release(first, "test")
+
+    for port in (52345, 52346, 52347):
+        again = await manager.acquire(f"10.0.0.9:{port}")
+        assert again.record.uid == uid, "client did not get its board back"
+        await manager.release(again, "test")
+
+
+async def test_affinity_is_a_preference_not_a_reservation(manager):
+    """If the remembered board is taken, you get another one rather than an
+    error -- that is the difference between affinity and a reservation."""
+    mine = await manager.acquire("10.0.0.9:1")
+    uid = mine.record.uid
+    await manager.release(mine, "test")
+
+    # Deterministically arrange for someone else to be holding that board: take
+    # both, then hand back only the other one.
+    held = [await manager.acquire("10.0.0.99:1"),
+            await manager.acquire("10.0.0.99:2")]
+    for session in held:
+        if session.record.uid != uid:
+            await manager.release(session, "test")
+    assert any(s.record.uid == uid and s.record.state is DeviceState.BUSY
+               for s in held), "the remembered board is not held"
+
+    fallback = await manager.acquire("10.0.0.9:3")
+    assert fallback.record.uid != uid, "handed out a board somebody else holds"
+    assert fallback.record.state is DeviceState.BUSY
+
+
+async def test_different_clients_settle_on_different_boards(manager):
+    """Two clients should not end up fighting over one board."""
+    a = await manager.acquire("10.0.0.9:1")
+    b = await manager.acquire("10.0.0.10:1")
+    uid_a, uid_b = a.record.uid, b.record.uid
+    assert uid_a != uid_b
+    await manager.release(a, "test")
+    await manager.release(b, "test")
+
+    a2 = await manager.acquire("10.0.0.9:2")
+    b2 = await manager.acquire("10.0.0.10:2")
+    assert a2.record.uid == uid_a
+    assert b2.record.uid == uid_b
+
+
+async def test_the_source_port_is_not_part_of_the_client_identity(manager):
+    """Every connection has a fresh ephemeral port, so keying on it would make
+    affinity useless."""
+    assert manager._client_of("10.0.0.9:52344") == "10.0.0.9"
+    assert manager._client_of("10.0.0.9:1") == "10.0.0.9"
+
+
+async def test_affinity_expires(manager, cfg):
+    import dataclasses
+    manager.cfg = dataclasses.replace(cfg, server=dataclasses.replace(
+        cfg.server, sticky_ttl_s=0))
+    session = await manager.acquire("10.0.0.9:1")
+    await manager.release(session, "test")
+    assert manager._remembered("10.0.0.9:2") == []
+
+
+async def test_sticky_allocation_can_be_turned_off(manager, cfg):
+    """With it off, allocation is least-used -- boards wear evenly and repeated
+    connects rotate."""
+    import dataclasses
+    manager.cfg = dataclasses.replace(cfg, server=dataclasses.replace(
+        cfg.server, sticky_allocation=False))
+
+    first = await manager.acquire("10.0.0.9:1")
+    uid = first.record.uid
+    await manager.release(first, "test")
+    second = await manager.acquire("10.0.0.9:2")
+    assert second.record.uid != uid, "expected rotation with sticky off"
+
+
+async def test_the_client_table_is_bounded(manager, cfg):
+    """A public port must not let strangers grow a dict without limit."""
+    import dataclasses
+    manager.cfg = dataclasses.replace(cfg, server=dataclasses.replace(
+        cfg.server, sticky_max_clients=8))
+    for i in range(40):
+        manager._remember(f"10.0.0.{i}:1", "some-uid")
+    assert len(manager._affinity) == 8

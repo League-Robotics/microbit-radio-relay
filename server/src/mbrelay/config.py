@@ -59,6 +59,15 @@ class ServerConfig:
     acquire_wait_ms: int = 0
     acquire_retries: int = 2
 
+    # Prefer to hand a returning client a board it had recently, so per-robot
+    # work keeps the same hardware across sessions and its logs stay comparable.
+    # A heuristic, not a reservation: if the board is taken you get another one.
+    # Keyed on the client's ADDRESS, so several clients behind one address share
+    # an affinity list and settle onto different boards between them.
+    sticky_allocation: bool = True
+    sticky_ttl_s: int = 3600
+    sticky_max_clients: int = 256
+
     # Prepend "# session <id>" to the preamble so a client can correlate its own
     # socket with `mbrelay status` and `mbrelay kick`. Off by default: it is a
     # byte a real serial port would never send, and byte-for-byte equivalence

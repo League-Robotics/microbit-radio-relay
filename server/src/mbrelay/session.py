@@ -21,6 +21,7 @@ import itertools
 import logging
 import re
 import time
+from collections import OrderedDict
 from typing import Callable
 
 from .errors import AcquireFailed, NoFreeDevice
@@ -171,6 +172,8 @@ class SessionManager:
         self.rejected_total = 0
         self.accepted_total = 0
         self._retry_tasks: set[asyncio.Task] = set()
+        # client address -> boards it used recently, most recent first
+        self._affinity: OrderedDict[str, list[tuple[str, float]]] = OrderedDict()
         inventory.on_device_gone = self._device_gone
 
     # -- acquire -----------------------------------------------------------
@@ -193,23 +196,70 @@ class SessionManager:
                                    releasing=counts["releasing"])
             await asyncio.sleep(0.25)
 
+    # -- board affinity ----------------------------------------------------
+    @staticmethod
+    def _client_of(peer: str) -> str:
+        """The client's address without its ephemeral source port."""
+        return peer.rsplit(":", 1)[0] if ":" in peer else peer
+
+    def _remembered(self, peer: str) -> list[str]:
+        """Boards this client used recently, most recent first."""
+        if not self.cfg.server.sticky_allocation:
+            return []
+        entries = self._affinity.get(self._client_of(peer))
+        if not entries:
+            return []
+        cutoff = time.time() - self.cfg.server.sticky_ttl_s
+        return [uid for uid, seen in entries if seen >= cutoff]
+
+    def _remember(self, peer: str, uid: str) -> None:
+        if not self.cfg.server.sticky_allocation:
+            return
+        client = self._client_of(peer)
+        entries = [e for e in self._affinity.pop(client, []) if e[0] != uid]
+        entries.insert(0, (uid, time.time()))
+        # Cap per client at the pool size: several clients behind one address
+        # then settle onto different boards instead of fighting over one.
+        self._affinity[client] = entries[:max(1, len(self.inventory.records))]
+        self._affinity.move_to_end(client)
+        while len(self._affinity) > self.cfg.server.sticky_max_clients:
+            self._affinity.popitem(last=False)
+
+    def _pick(self, candidates: list[DeviceRecord], peer: str) -> DeviceRecord:
+        """Choose a board: one this client had recently, else least-used.
+
+        Affinity keeps per-robot work on the same hardware so its logs stay
+        comparable across sessions. It is only a preference -- if the remembered
+        board is taken, the least-used free one is handed out instead, which also
+        spreads flash and USB wear when nobody has a history.
+        """
+        by_uid = {r.uid: r for r in candidates}
+        for uid in self._remembered(peer):
+            if uid in by_uid:
+                return by_uid[uid]
+        return min(candidates, key=lambda r: (r.sessions_total, r.uid))
+
     async def _try_acquire(self, peer: str) -> Session | None:
+        tried: set[str] = set()
         for _ in range(max(1, self.cfg.server.acquire_retries)):
-            candidates = self.inventory.free_devices()
+            candidates = [r for r in self.inventory.free_devices()
+                          if r.uid not in tried]
             if not candidates:
                 return None
-            # Least recently used, so boards wear evenly and a flaky one does not
-            # get handed out repeatedly.
-            record = min(candidates, key=lambda r: (r.sessions_total, r.uid))
+            record = self._pick(candidates, peer)
+            tried.add(record.uid)
             if not self.inventory.reserve(record):
                 continue              # someone else won the race; try the next one
             try:
-                return await self._bring_up(record, peer)
+                session = await self._bring_up(record, peer)
             except Exception as exc:
                 record.state = DeviceState.ERROR
                 self.inventory.note_error(record, repr(exc))
                 log.error("acquire failed uid=%s port=%s err=%r",
                           record.uid, record.port, exc)
+                continue
+            self._remember(peer, record.uid)
+            return session
         return None
 
     async def _bring_up(self, record: DeviceRecord, peer: str) -> Session:

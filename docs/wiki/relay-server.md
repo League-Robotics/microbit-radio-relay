@@ -37,9 +37,13 @@ serial open would give you.
 When you disconnect, the server resets the board and restores those defaults
 before anyone else can have it.
 
-You do not choose which board you get, and it is **not** the same one each time:
-the pool hands out the least-recently-used board, so repeated connects rotate
-through them. Read the banner to see which you got.
+You do not choose which board you get, but you usually get **the same one back**:
+the pool remembers which boards your machine used recently and prefers them. That
+keeps per-robot work on the same hardware so its logs stay comparable.
+
+It is a preference, not a reservation. If your board is taken you get another —
+the least recently used one — so nothing blocks and wear stays spread. Read the
+banner to see which you got.
 
 That last part is why this is a service rather than a `socat` one-liner. The
 relay firmware **persists its configuration in flash** across resets and
