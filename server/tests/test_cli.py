@@ -201,3 +201,12 @@ def test_flash_of_an_absent_board_reports_no_device(monkeypatch, tmp_path, capsy
 def test_connect_target_parsing(target, expected):
     from mbrelay.client import parse_target
     assert parse_target(target) == expected
+
+
+def test_flash_result_names_the_board_not_the_interface_chip():
+    """Four boards from one batch share the last sixteen UID characters, so a
+    tail slice labels every line of flash output identically."""
+    from mbrelay.firmware import FlashResult
+    a = FlashResult(uid="9906360200052820aaaa2372c44f4f67000000006e052820", name="", ok=True)
+    b = FlashResult(uid="9906360200052820bbbb6c3809a44554000000006e052820", name="", ok=True)
+    assert a.short_uid != b.short_uid

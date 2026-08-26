@@ -41,6 +41,11 @@ class FlashResult:
     ok: bool
     message: str = ""
 
+    @property
+    def short_uid(self) -> str:
+        """The distinguishing slice of the DAPLink UID -- see DeviceRecord."""
+        return self.uid[16:24] if len(self.uid) >= 32 else self.uid[-8:]
+
 
 class Flasher:
     def __init__(self, cfg) -> None:
@@ -103,8 +108,8 @@ class Flasher:
         ], timeout=300)
         ok = result.returncode == 0
         message = (result.stderr or result.stdout or "").strip().splitlines()
-        return FlashResult(uid=uid, name=uid[-8:], ok=ok,
-                           message=message[-1] if message else "")
+        return FlashResult(uid=uid, name=uid[16:24] if len(uid) >= 32 else uid[-8:],
+                           ok=ok, message=message[-1] if message else "")
 
     def _run(self, args: list[str], timeout: float = 120) -> subprocess.CompletedProcess:
         cwd = self.pyocd_cwd()

@@ -427,7 +427,7 @@ def cmd_flash(args) -> int:
         _unquiesce(args, disabled)
 
     for result in results:
-        print(f"  {'ok  ' if result.ok else 'FAIL'} {result.uid[-12:]} {result.message}")
+        print(f"  {'ok  ' if result.ok else 'FAIL'} {result.short_uid} {result.message}")
     failed = [r for r in results if not r.ok]
     if args.json:
         _emit(args, {"results": [r.__dict__ for r in results]})

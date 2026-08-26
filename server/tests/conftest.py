@@ -9,11 +9,31 @@ from pathlib import Path
 
 import pytest
 
+from mbrelay import config as config_module
 from mbrelay.config import load as load_config
 from mbrelay.transport import PortInfo
 
 from fake_relay import FakeChannelFactory, FakeRelayFirmware, FakeScanner
 from relay_fixtures import PORT_A, PORT_B, UID_A, UID_B
+
+
+@pytest.fixture(autouse=True)
+def isolate_config_search(monkeypatch, tmp_path):
+    """Never let a test read the machine's real configuration.
+
+    Found the hard way: on a host where the Ansible role had installed
+    /etc/mbrelay/mbrelay.toml, the unit suite picked it up and two tests failed
+    that pass in CI. Unit tests must describe the code, not the machine they
+    happen to run on.
+    """
+    absent = tmp_path / "no-such-config"
+    monkeypatch.setattr(config_module, "SYSTEM_CONFIG", absent / "mbrelay.toml")
+    monkeypatch.setattr(config_module, "SYSTEM_CONF_D", absent / "conf.d")
+    monkeypatch.setattr(config_module, "LOCAL_CONFIG", absent / "mbrelay.toml")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(absent / "xdg"))
+    for var in ("STATE_DIRECTORY", "RUNTIME_DIRECTORY", "XDG_RUNTIME_DIR",
+                "JOURNAL_STREAM"):
+        monkeypatch.delenv(var, raising=False)
 
 
 @pytest.fixture
