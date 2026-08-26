@@ -1,0 +1,4 @@
+# Hatchling output. The root .gitignore already catches build/ (its bare `build`
+# entry matches at any depth), but not these.
+dist/
+*.egg-info/

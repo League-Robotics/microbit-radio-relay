@@ -1,0 +1,42 @@
+[project]
+name = "microbit-relayd"
+description = "TCP server that hands out USB-attached micro:bit radio relays as transparent byte streams"
+readme = "README.md"
+requires-python = ">=3.11"          # tomllib is stdlib from 3.11; Ubuntu 24.04 ships 3.12
+license = { text = "MIT" }
+authors = [{ name = "Eric Busboom", email = "eric.busboom@jointheleague.org" }]
+dynamic = ["version"]
+
+# Deliberately one dependency. This is what lets the fleet install be
+#   apt install python3-serial && pip install --break-system-packages <wheel>
+# with no venv and no build toolchain on the node.
+dependencies = ["pyserial>=3.5"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23", "build>=1.0"]
+
+[project.scripts]
+mbrelay = "mbrelay.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Busboombot/microbit-radio-relay"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/mbrelay/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mbrelay"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/mbrelay", "tests", "packaging", "README.md", "pyproject.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "hil: hardware-in-the-loop; needs real micro:bit relays attached (deselect with -m 'not hil')",
+]

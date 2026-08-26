@@ -10,7 +10,8 @@ tags: [microbit, radio, relay, howto, getting-started]
 
 This page is the practical guide: how to get firmware onto a board and how to
 drive it from a host. For the exhaustive grammar see the
-[Protocol Reference](protocol).
+[Protocol Reference](protocol); to reach a board plugged into *another* machine,
+see the [Relay Server](relay-server).
 
 ## 1. Flash the firmware
 
@@ -19,8 +20,8 @@ Build produces a `MICROBIT.hex`. Flash it by copying it to the mounted
 performs can race the board's mass-storage flasher and fail silently:
 
 ```bash
-cat MICROBIT.hex > /Volumes/MICROBIT/      # macOS
-# cat MICROBIT.hex > /media/$USER/MICROBIT/   # Linux
+cat MICROBIT.hex > /Volumes/MICROBIT/MICROBIT.hex          # macOS
+# cat MICROBIT.hex > /media/$USER/MICROBIT/MICROBIT.hex   # Linux
 ```
 
 When two boards form a RAW250 link, **both must run firmware built with the same
