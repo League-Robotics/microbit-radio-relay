@@ -17,6 +17,14 @@ on:
 permissions:
   contents: write
 
+# Pushing a tag triggers this, and a workflow_dispatch on the same tag is the
+# obvious way to re-run it. Both at once meant two jobs racing to create one
+# release, and the loser died with "HTTP 422: Validation Failed". Serialize per
+# tag rather than cancelling: a half-finished upload is worse than a short wait.
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   firmware:
     runs-on: ubuntu-22.04
@@ -98,10 +106,11 @@ jobs:
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
+          # Tolerate a release that appeared between the check and the create:
+          # concurrency serializes runs, but a human can also cut one by hand.
           if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --generate-notes
+            gh release create "$TAG" --title "$TAG" --generate-notes \
+              || gh release view "$TAG" >/dev/null
           fi
           # --clobber so re-running the workflow replaces assets rather than failing.
           gh release upload "$TAG" assets/* --clobber
