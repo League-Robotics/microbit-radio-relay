@@ -68,7 +68,9 @@ jobs:
         run: |
           pip install -e '.[dev]'
           pytest -m 'not hil' -q
-      - run: python -m build server/
+      - name: Build the sdist and wheel
+        working-directory: server
+        run: python -m build
       - uses: actions/upload-artifact@v4
         with:
           name: python-dist
