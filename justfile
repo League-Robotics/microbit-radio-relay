@@ -34,3 +34,10 @@ deploy *args='':
 
 build-deploy *args='':
     uv run python3 scripts/build_and_deploy.py {{args}}
+
+# Cross-implementation check that name <-> (channel, group) agrees everywhere:
+# this repo's Python and firmware C++, plus every sibling repo that has a
+# tools/radio-address-dump (protocol §3.7). Pass repo dirs or dump files to
+# pick targets; default is "auto".
+conformance *args='':
+    python3 scripts/radio_address_conformance.py {{args}}

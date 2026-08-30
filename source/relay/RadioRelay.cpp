@@ -47,6 +47,7 @@ SOFTWARE.
 
 #include "MicroBit.h"
 #include "RadioRelay.h"
+#include "naming.h"   // §3.7 name -> (channel, group); shared with the host conformance dump
 #include "nrf.h"     // NRF_RADIO, RADIO_IRQn, NVIC_* for retuneReceiver()
 #include "Radio.h"   // RADIO_EVT_DATA_READY (radio diagnostics)
 
@@ -144,8 +145,6 @@ namespace
     // ---------------------------------------------------------------------
     // Relay state
     // ---------------------------------------------------------------------
-    // A micro:bit name is exactly five letters (§3.7).
-    constexpr int kNameLen = 5;
 
     struct Config
     {
@@ -154,7 +153,7 @@ namespace
         int  power   = kDefaultPower;
         Mode mode    = MODE_RAW250;  // default 250-byte mode (old MakeCode relays retired)
         bool frag    = false;       // MAKECODE over-length policy: fragment vs truncate
-        char name[kNameLen + 1] = {0};  // §3.7: set by !N; "" once !C/!CG/buttons pick a number
+        char name[naming::kNameLen + 1] = {0};  // §3.7: set by !N; "" once !C/!CG/buttons pick a number
     };
 
     Config cfg;
@@ -190,7 +189,7 @@ namespace
         uint8_t mode;       // MODE_MAKECODE / MODE_RAW250
         uint8_t frag;
         uint8_t echo;
-        char    name[kNameLen + 1];   // §3.7, NUL-terminated; "" = link not chosen by name
+        char    name[naming::kNameLen + 1];   // §3.7, NUL-terminated; "" = link not chosen by name
     };
     // The KeyValueStorage value slot is 32 bytes (48-byte block minus 16-byte key).
     static_assert(sizeof(StoredConfig) <= 32, "relaycfg record no longer fits a KeyValuePair");
@@ -243,7 +242,7 @@ namespace
         cfg.frag  = sc.frag != 0;
         echoMode  = sc.echo != 0;
         memcpy(cfg.name, sc.name, sizeof(cfg.name));
-        cfg.name[kNameLen] = 0;             // never trust flash to terminate
+        cfg.name[naming::kNameLen] = 0;             // never trust flash to terminate
     }
 
     // ---------------------------------------------------------------------
@@ -724,91 +723,9 @@ namespace
         saveConfig();
     }
 
-    // ---------------------------------------------------------------------
-    // §3.7 Named links: a micro:bit's name IS its radio address.
-    //
-    // The five-letter CODAL friendly name is NRF_FICR->DEVICEID[1] in base 5,
-    // so a robot derives its own (channel, group) at boot and `!N <name>`
-    // retunes the relay to the same pair. Normative spec: docs/radio-addressing.md
-    // in pxt-nezha-diffdrive; mbrelay's naming.py carries the same steps and
-    // asserts the whole 3125-name space against the published digest.
-    //
-    //   positions 0,2,4  consonant  z v g p t = 0..4
-    //   positions 1,3    vowel      u o i e a = 0..4
-    //   n = base5(name), name[0] most significant            0..3124
-    //   channel = 25 + 2 * (n % 25)                           25..73, odd
-    //   group   = 1 + n / 25; if group >= 10: group += 1      1..9, 11..126
-    //
-    // Never emitted: channels 3, 4, 7 and groups 0, 10 -- group 10 is the
-    // !C/button space, so a hand-dialled relay never lands on a derived link,
-    // and `!C` cannot reach a named board at all: only `!CG` or `!N` can.
-    // ---------------------------------------------------------------------
-
-    // Digit value of `c` at name position `p`, or -1 if `c` is not in that
-    // position's alphabet.
-    int nameDigit(int p, char c)
-    {
-        const char *alphabet = (p % 2 == 0) ? "zvgpt" : "uoiea";
-        for (int d = 0; d < 5; ++d)
-            if (alphabet[d] == c)
-                return d;
-        return -1;
-    }
-
-    bool isAsciiSpace(char c)
-    {
-        return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v';
-    }
-
-    // Canonical form: trim ASCII whitespace, A-Z -> a-z, then exactly
-    // [zvgpt][uoiea][zvgpt][uoiea][zvgpt]. `out` must hold kNameLen + 1.
-    // Returns false (and an empty `out`) for anything else.
-    bool normalizeName(const char *in, char *out)
-    {
-        out[0] = 0;
-        while (isAsciiSpace(*in))
-            ++in;
-        int n = 0;
-        for (; *in && !isAsciiSpace(*in); ++in)
-        {
-            char c = *in;
-            if (c >= 'A' && c <= 'Z')
-                c = (char)(c + ('a' - 'A'));
-            if (n >= kNameLen || nameDigit(n, c) < 0)
-            {
-                out[0] = 0;                     // too long, or not that position's letter
-                return false;
-            }
-            out[n++] = c;
-        }
-        for (; *in; ++in)
-        {
-            if (!isAsciiSpace(*in))
-            {
-                out[0] = 0;                     // "to vez": a space inside
-                return false;
-            }
-        }
-        if (n != kNameLen)
-        {
-            out[0] = 0;                         // too short
-            return false;
-        }
-        out[n] = 0;
-        return true;
-    }
-
-    // `name` must already be canonical (normalizeName returned true).
-    void nameToRadio(const char *name, int &channel, int &group)
-    {
-        int n = 0;
-        for (int p = 0; p < kNameLen; ++p)
-            n = n * 5 + nameDigit(p, name[p]);  // 0..3124, name[0] most significant
-        channel = 25 + 2 * (n % 25);
-        group   = 1 + n / 25;
-        if (group >= 10)
-            group += 1;
-    }
+    // §3.7 Named links: the name -> (channel, group) mapping lives in naming.h,
+    // a pure header the host conformance dump compiles too, so the firmware
+    // and the other implementations are compared on the same code.
 
     // Set the echo transponder explicitly (the !ECHO serial command). The A+B
     // button uses the mode menu below instead.
@@ -1114,18 +1031,18 @@ namespace
         // Named link (§3.7) --------------------------------------------------
         if (strcmp(line, "!N?") == 0)
         {
-            char out[kNameLen + 8];
+            char out[naming::kNameLen + 8];
             snprintf(out, sizeof(out), "name: %s", cfg.name[0] ? cfg.name : "-");
             comment(out);
             return false;
         }
         if (startsWith(line, "!N "))
         {
-            char name[kNameLen + 1];
-            if (normalizeName(line + 3, name))
+            char name[naming::kNameLen + 1];
+            if (naming::normalizeName(line + 3, name))
             {
                 int ch = 0, grp = 0;
-                nameToRadio(name, ch, grp);
+                naming::nameToRadio(name, ch, grp);
                 cfg.channel = ch;
                 cfg.group = grp;
                 memcpy(cfg.name, name, sizeof(cfg.name));

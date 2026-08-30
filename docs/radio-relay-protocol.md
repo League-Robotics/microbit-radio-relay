@@ -261,6 +261,11 @@ normative, with the machine-readable `docs/radio-address-vectors.json`). This
 firmware (`nameToRadio` in [`RadioRelay.cpp`](../source/relay/RadioRelay.cpp)) and the server ([`naming.py`](../server/src/mbrelay/naming.py)) implement the same
 steps; the server's tests mirror the vectors file and check the **entire
 3125-name space** against its published sha256 rather than a sampled table.
+`just conformance` goes one step further: it runs every implementation — this
+firmware's mapping compiled for the host, the server's Python, and any sibling
+repository exposing a `tools/radio-address-dump` — and reports the first name on
+which any two disagree, so the three repos are checked against *each other*,
+not only against the spec.
 
 ```
 positions 0, 2, 4   consonant   z v g p t   = 0 1 2 3 4
