@@ -28,6 +28,7 @@ from .errors import AcquireFailed, NoFreeDevice
 from .inventory import DeviceRecord, DeviceState, Inventory
 from .logs import session_logger
 from .relay import Reader, RelayControl
+from .naming import name_to_radio, validate
 from .transport import ByteChannel
 
 log = logging.getLogger(__name__)
@@ -43,7 +44,12 @@ _DATA_PLANE_MARK = b"# entering data plane"
 # not police this (it is a transparent pipe, and a channel may be shared on
 # purpose), but it can at least SEE it: the channel shows up in `mbrelay status`
 # and a collision is logged.
-_CHANNEL_RE = re.compile(rb"^!(?:C|CG|RC)\s+(\d+)", re.MULTILINE)
+#
+# `!N <name>` selects a link by robot name; the client never sees a number, so
+# the daemon computes the channel with the same mapping the firmware uses
+# (naming.py) to keep the status view honest. `!N?` is a query and must not
+# match: it has no whitespace after the N.
+_CHANNEL_RE = re.compile(rb"^!(?:(?:C|CG|RC)\s+(\d+)|N[ \t]+([^\r\n]+))", re.MULTILINE)
 
 
 class Session:
@@ -64,6 +70,7 @@ class Session:
         self.last_activity = self.started
         self.plane = "command"
         self.radio_channel: int | None = None   # last channel this client selected
+        self.radio_name: str | None = None      # ...and the name it was chosen by, if any
         self._cmd_tail = b""
         # Serial reads land on arbitrary chunk boundaries, so the marker below
         # can straddle two of them. Keep the tail of the previous chunk and
@@ -141,12 +148,20 @@ class Session:
         if len(self._cmd_tail) > 256:          # not a line; stop accumulating
             self._cmd_tail = b""
         for match in _CHANNEL_RE.finditer(lines):
-            try:
-                channel = int(match.group(1))
-            except ValueError:
-                continue
-            if channel != self.radio_channel:
-                self.radio_channel = channel
+            if match.group(2) is not None:              # !N <name>
+                try:
+                    name = validate(match.group(2).decode("ascii"))
+                except (UnicodeDecodeError, ValueError):
+                    continue                            # the board rejects it too
+                channel = name_to_radio(name)[0]
+            else:                                       # !C / !CG / !RC <ch> ...
+                try:
+                    channel = int(match.group(1))
+                except ValueError:
+                    continue
+                name = None
+            if channel != self.radio_channel or name != self.radio_name:
+                self.radio_channel, self.radio_name = channel, name
                 self._on_channel(self)
 
     def to_json(self) -> dict:
@@ -154,7 +169,7 @@ class Session:
             "id": self.id, "uid": self.record.uid, "device_name": self.record.name,
             "port": self.record.port, "peer": self.peer,
             "started": round(self.started, 3), "age_s": round(self.age, 1),
-            "plane": self.plane, "channel": self.radio_channel,
+            "plane": self.plane, "channel": self.radio_channel, "name": self.radio_name,
             "rx_bytes": self.rx_bytes, "tx_bytes": self.tx_bytes,
             "idle_s": round(self.idle, 1),
         }

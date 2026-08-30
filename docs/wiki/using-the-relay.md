@@ -52,6 +52,7 @@ only before `!GO`:
 HELLO            # re-request the banner if you missed it
 ?                # read back: # channel: <ch> group: <g> mode: <m> power: <p>
 !C 5             # channel 5 (forces group 10)
+!N tovez         # ...or the link the robot named tovez uses (see Protocol §3.7)
 !MODE RAW250     # (default) headerless ≤250-byte framing
 !ECHO ON         # optional: make this board a transponder
 !GO              # enter the transparent data plane
@@ -72,6 +73,7 @@ Common commands (full table in the [Protocol Reference](protocol)):
 | ------------------ | ----------------------------------------------------------------- |
 | `!C <ch>`          | channel 0–35, forces group 10                                     |
 | `!CG <ch> <group>` | channel 0–83 and group 0–255 (`!RC` is an alias)                  |
+| `!N <name>`        | the link the robot named `<name>` uses — channel+group from its name |
 | `!P <0-7>`         | transmit power                                                    |
 | `!MODE RAW250`     | headerless ≤250-byte framing (default)                            |
 | `!MODE MAKECODE`   | 32-byte CODAL packets for a stock MakeCode robot                  |

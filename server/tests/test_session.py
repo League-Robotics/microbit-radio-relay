@@ -8,6 +8,7 @@ import pytest
 
 from mbrelay.errors import NoFreeDevice
 from mbrelay.inventory import TERMINAL, DeviceState, Inventory
+from mbrelay.naming import name_to_radio
 from mbrelay.relay import RelayControl
 from mbrelay.session import SessionManager
 
@@ -454,3 +455,43 @@ async def test_the_client_table_is_bounded(manager, cfg):
     for i in range(40):
         manager._remember(f"10.0.0.{i}:1", "some-uid")
     assert len(manager._affinity) == 8
+
+
+async def test_a_link_selected_by_name_is_visible(manager):
+    """`!N <name>` picks a channel the client never types, so the status view
+    has to compute it the way the firmware does (naming.py) -- otherwise a
+    collision between a named link and a `!C` one would be invisible."""
+    session = await manager.acquire("test:1")
+    session.attach(sink=lambda d: None, on_gone=lambda exc: None)
+
+    session.write_to_board(b"!N Tovez\n")
+    assert session.radio_channel == name_to_radio("tovez")[0] == 69
+    assert session.to_json()["name"] == "tovez"
+
+    session.write_to_board(b"!N?\n")                 # a query, not a selection
+    assert (session.radio_channel, session.radio_name) == (69, "tovez")
+
+    session.write_to_board(b"!C 3\n")                # a number forgets the name
+    assert (session.radio_channel, session.radio_name) == (3, None)
+
+
+async def test_a_name_the_board_would_reject_does_not_change_the_view(manager):
+    session = await manager.acquire("test:1")
+    session.attach(sink=lambda d: None, on_gone=lambda exc: None)
+    session.write_to_board(b"!C 5\n")
+    session.write_to_board(b"!N \n")
+    session.write_to_board(b"!N " + b"x" * 40 + b"\n")
+    assert (session.radio_channel, session.radio_name) == (5, None)
+
+
+async def test_a_named_link_and_a_numbered_one_on_one_channel_collide(manager, caplog):
+    a = await manager.acquire("test:1")
+    b = await manager.acquire("test:2")
+    for s in (a, b):
+        s.attach(sink=lambda d: None, on_gone=lambda exc: None)
+
+    a.write_to_board(b"!N tovez\n")                  # channel 69
+    with caplog.at_level("WARNING"):
+        b.write_to_board(b"!CG 69 10\n")
+    assert any("channel_collision" in r.message for r in caplog.records), \
+        [r.message for r in caplog.records]

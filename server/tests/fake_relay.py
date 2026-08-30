@@ -14,16 +14,19 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field, replace
 
+from mbrelay import naming
+
 
 @dataclass
 class StoredConfig:
-    """The 8-byte record the firmware keeps under the "relaycfg" key."""
+    """The record the firmware keeps under the "relaycfg" key."""
     channel: int = 0
     group: int = 10
     power: int = 7
     mode: str = "RAW250"
     frag: str = "OFF"
     echo: str = "OFF"
+    name: str = ""          # set by !N <name>; cleared by !C / !CG
 
 
 DEFAULTS = StoredConfig()
@@ -76,7 +79,8 @@ class FakeRelayFirmware:
     def _print_config(self) -> None:
         c = self.cfg
         self._comment(f"channel: {c.channel} group: {c.group} "
-                      f"mode: {c.mode} power: {c.power}")
+                      f"mode: {c.mode} power: {c.power}"
+                      + (f" name: {c.name}" if c.name else ""))
 
     def _save(self) -> None:
         self.flash = replace(self.cfg)
@@ -132,7 +136,7 @@ class FakeRelayFirmware:
                 self._comment("error: usage !C <ch 0-35>"); return
             if not 0 <= channel <= 35:
                 self._comment("error: usage !C <ch 0-35>"); return
-            c.channel, c.group = channel, 10       # !C forces group 10
+            c.channel, c.group, c.name = channel, 10, ""   # !C forces group 10
             self._save()
             self._print_config()                   # !C calls printConfig()
         elif line.startswith((b"!CG ", b"!RC ")):
@@ -140,7 +144,17 @@ class FakeRelayFirmware:
                 channel, group = (int(x) for x in line.split()[1:3])
             except ValueError:
                 self._comment("error: usage !CG <ch 0-83> <group 0-255>"); return
-            c.channel, c.group = channel, group
+            c.channel, c.group, c.name = channel, group, ""
+            self._save(); self._print_config()
+        elif line == b"!N?":
+            self._comment(f"name: {c.name or '-'}")
+        elif line.startswith(b"!N "):
+            try:
+                name = naming.validate(line[3:].decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                self._comment("error: usage !N <name>"); return
+            c.channel, c.group = naming.name_to_radio(name)
+            c.name = name
             self._save(); self._print_config()
         elif line.startswith(b"!P "):
             try:
@@ -160,6 +174,7 @@ class FakeRelayFirmware:
                 self.peer.out += b"< " + payload + b"\r\n"
         elif line == b"!HELP":
             self._comment("!C <ch>            set channel")
+            self._comment("!N <name>          set channel+group from a micro:bit name")
         else:
             self._comment("error: unknown command (try !HELP)")
 

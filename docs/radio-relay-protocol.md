@@ -132,6 +132,7 @@ sending is done in the data plane after `!GO`, with no prefix.
 | `!C <ch>`          | Set channel (0–35), forces group 10. Display shows the channel glyph. |
 | `!CG <ch> <group>` | Set channel (0–83) and group (0–255). Display shows `?`.            |
 | `!RC <ch> <group>` | Alias of `!CG`.                                                     |
+| `!N <name>`        | Set channel and group from a micro:bit name (§3.7). Display shows `?`. |
 | `!P <0-7>`         | Set transmit power.                                                 |
 | `!MODE MAKECODE`   | Select 32-byte CODAL framing.                                       |
 | `!MODE RAW250`     | Select headerless ≤250-byte framing (default). `RAW251` accepted as alias. |
@@ -142,7 +143,7 @@ sending is done in the data plane after `!GO`, with no prefix.
 | `!HELP`            | Print protocol summary.                                            |
 | `HELLO`            | Re-request the device announcement banner.                         |
 
-Config changes (`!C`, `!CG`/`!RC`, `!P`, `!MODE`, `!FRAG`, `!ECHO`) are applied
+Config changes (`!C`, `!CG`/`!RC`, `!N`, `!P`, `!MODE`, `!FRAG`, `!ECHO`) are applied
 immediately, persisted to flash (§2.1), and echoed back as a `#` comment.
 
 **Debug commands** (compiled in by default; the whole facility is stripped when
@@ -163,6 +164,7 @@ lines is unaffected when debug is on.
 | --------- | ------------------------------------------------------- |
 | `?`       | `# channel: <ch> group: <g> mode: <m> power: <p>`       |
 | `!MODE?`  | `# mode: MAKECODE` or `# mode: RAW250`                  |
+| `!N?`     | `# name: <name>`, or `# name: -` if the link was not chosen by name (§3.7) |
 | `!DEBUG?` | `# debug: ON` or `# debug: OFF` (debug build only)      |
 
 Query support matters because the host cannot otherwise see relay state. Even
@@ -230,6 +232,56 @@ The 5×5 display reflects state:
   packet-size mode (`32` for MAKECODE, `25` for RAW250) → channel glyph → settle
   to the resting display. This reflects the persisted config restored at boot.
 - **Entering the data plane:** a single `.`.
+
+### 3.7 Named links
+
+A robot running the League firmware derives its radio link from its own
+micro:bit name (the CODAL friendly name, e.g. `tovez`), so the host never needs
+to know the numbers. `!N <name>` puts the relay on the same link:
+
+```
+!N tovez
+# channel: 69 group: 214 mode: RAW250 power: 7 name: tovez
+```
+
+The name is trimmed and lower-cased (`TOVEZ`, ` tovez ` and `tovez` are one
+robot) and must be 1–15 printable ASCII characters with no spaces; anything else
+is answered with `# error: usage !N <name>`. The link is applied and persisted
+exactly like `!CG`, and the name is persisted with it, so `?` keeps reporting
+`name: <name>` after a reset and `!N?` answers `# name: tovez`. `!C`, `!CG`/`!RC`
+and the A/B buttons choose a link by *number* and therefore forget the name
+(`!N?` then answers `# name: -`).
+
+`name:` is always the **last** field of the config line, so a parser anchored on
+`# channel:` — every existing one — is unaffected.
+
+**The mapping** is a contract shared by this firmware (`nameToRadio` in
+[`RadioRelay.cpp`](../source/relay/RadioRelay.cpp)), the server ([`naming.py`](../server/src/mbrelay/naming.py)) and the robot's MakeCode extension
+(pxt-nezha-diffdrive); all three assert the same vector table.
+
+1. `h = 0`; for each byte `b` of the normalized name: `h = (h × 31 + b) mod 65521`
+2. `channel = h mod 84` → 0–83
+3. `g = (h div 84) mod 254`; if `g ≥ 10` then `g = g + 1` → 0–9, 11–254
+
+Every intermediate is below 2²¹, so MakeCode's static TypeScript (IEEE doubles,
+no `Math.imul`) computes it exactly. **Group 10 is never produced**: it is the
+`!C`/button space (§3.5), so a relay dialled by hand can never silently share a
+named robot's link, and `?` on the display always means a custom or named link.
+
+| name       | channel | group |
+| ---------- | ------- | ----- |
+| `getez`    | 64      | 107   |
+| `zavaz`    | 3       | 119   |
+| `tovez`    | 69      | 214   |
+| `vevov`    | 20      | 212   |
+| `gopiv`    | 78      | 235   |
+| `a`        | 13      | 1     |
+| `microbit` | 25      | 196   |
+
+Over the 3125 possible CODAL friendly names the mapping yields 3005 distinct
+links (worst case three names on one), so a room of twenty robots has under a 1%
+chance of any two sharing a link — and both ends print the pair, so a collision
+is visible rather than silent.
 
 ---
 
@@ -389,3 +441,6 @@ standalone-peer echo/MAKECODE tests are the other `scripts/*_test.py` files.
    (RAW250); both ends must match.
 8. **Reliability** — fire-and-forget today; the `ACK_REQ`/`ACK` responder is
    wired, the stop-and-wait sender is the next step. (§5.3)
+9. **Named links** — *Implemented:* `!N <name>` / `!N?`, name persisted with the
+   config (record v2). The mapping is shared with mbrelay and the robot
+   extension; the vector table is the contract. (§3.7)
