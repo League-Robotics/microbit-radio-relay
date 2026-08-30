@@ -11,7 +11,9 @@
     "normalize": "trim ASCII whitespace; map A-Z to a-z",
     "accept": "^[zvgpt][uoiea][zvgpt][uoiea][zvgpt]$",
     "encode": "n -> name, the inverse of decode: for p = 4 down to 0: name[p] = alphabet(p)[n % 5]; n = n / 5",
-    "endianness": "name[0] is the MOST significant base-5 digit and name[4] the LEAST. Base-5 conversion naturally emits least-significant first, so a naive encoder produces reversed names: n=1 is 'zuzuv', not 'vuzuz'. The error is diagnostic-free -- 3125 well-formed, regex-passing, distinct names in the wrong order."
+    "endianness": "name[0] is the MOST significant base-5 digit and name[4] the LEAST. Base-5 conversion naturally emits least-significant first, so a naive encoder produces reversed names: n=1 is 'zuzuv', not 'vuzuz'. The error is diagnostic-free -- 3125 well-formed, regex-passing, distinct names in the wrong order.",
+    "reject_non_cvcvc": "A name outside ^[zvgpt][uoiea][zvgpt][uoiea][zvgpt]$ after normalize has NO address and MUST raise. Never fall back to a hash, a default, or a truncation: base5 is undefined outside the codebook, and inventing an address is the silent-failure class this whole scheme exists to remove. Applies to !N and to every host tool.",
+    "malformed_vs_unknown": "MALFORMED (outside the accept regex) must raise -- no address exists. WELL-FORMED BUT UNKNOWN (a valid CVCVC name no board currently uses) must be ACCEPTED -- it is a legal retune to a quiet pair. The address layer does not know which boards exist and must not pretend to; that is the deploy-time silicon gate's job. Rejecting the second breaks tune-to-whatever-I-name; accepting the first yields a working-looking link on an arbitrary channel. Both failures are silent, in opposite directions."
   },
   "ranges": {
     "n": [
@@ -64,6 +66,18 @@
       "why": "Digit-palindrome names are IDENTICAL under both orderings and cannot detect a reversed encoder. zuzuz, tatat, zotoz and pipip are all palindromes -- including both extremes, which is what an implementer reaches for first. zotuz (n=225) reverses to zutoz and is the published vector that catches it.",
       "reversed_encoder_digest": "52ea4a6e6124cdebbb56639d21db15b48f95d54aeb38ce93f7df9e7f9fbeb8dc",
       "reversed_encoder_digest_note": "If your digest equals THIS value, your encoder is little-endian; reverse the digit order."
+    },
+    "full_space_sha256_note": "D1 -- FORWARD ONLY. Covers encode(n->name) and addr(n->pair). It does NOT call decode(name->n) or reverse(pair->n): a build with both of those broken produces a byte-identical D1. Keep it as a diagnostic bisector -- D2 failing while D1 passes localises the fault to decode/reverse -- but D2 is the conformance gate.",
+    "conformance_sha256": "f10db38bb3cdd2c5e15e69384f8633ff315876615f65bec8d4660e2012867657",
+    "conformance_sha256_note": "D2 -- PRIMARY conformance constant. Canonical form: for n = 0..3124 in order, one line '<name>,<channel>,<group>,<decode(name)>,<reverse(channel,group)>\\n', UTF-8, sha256 of the concatenation. The last two columns are always n, which is the point: every line forces decode() and reverse() to run and hashes their output. decode() is the PRODUCTION path -- it is what the relay's !N <name> executes on every command. A little-endian decoder is wrong on 3000 of 3125 names (96%) and passes D1; against D2 it yields 2e4e9013... and fails loudly.",
+    "conformance_sha256_broken_decode": {
+      "digest": "5acfd688ee679d4ce56d5e686ae9b3931cf8d570cca250111f685e1f867fe6c9",
+      "fault": "EXACTLY ONE fault: decode() reads name[0] as the LEAST significant base-5 digit (little-endian) while encode(), addr() and reverse() are all correct. That decoder is wrong on 3000 of 3125 names (96%) and produces a byte-identical D1.",
+      "use": "If an implementation's D2 equals this, its decoder is little-endian: reverse the digit order. A previous revision published the prefix 2e4e9013 for a DOUBLE fault (little-endian decode AND reverse() returning 0) without specifying the variant, which made it unreproducible from the spec and therefore useless as a diagnostic. Reported by pxt-nezha-diffdrive-4f, who tried six reconstructions and could not regenerate it."
+    },
+    "dump_protocol": {
+      "v1": "3 columns '<name>,<channel>,<group>' -- digests to D1. Accepted; does not exercise the inverse.",
+      "v2": "5 columns '<name>,<channel>,<group>,<decode(name)>,<reverse(channel,group)>' -- digests to D2. PREFERRED. A checker can tell them apart by counting columns. v2 puts the inverse INTO the hashed artifact rather than trusting each dumper's internal self-check."
     }
   },
   "reject": [

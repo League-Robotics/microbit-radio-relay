@@ -45,7 +45,8 @@ def test_the_firmware_cpp_agrees_with_python_on_every_name():
     for i, (a, b) in enumerate(zip(firmware.splitlines(), python.splitlines())):
         assert a == b, f"first disagreement at n={i}: firmware {a!r}, python {b!r}"
     assert firmware == python
-    assert hashlib.sha256(firmware.encode()).hexdigest() == SPEC["properties"]["full_space_sha256"]
+    # v2 dumps (five columns) digest to D2, the conformance gate.
+    assert hashlib.sha256(firmware.encode()).hexdigest() == SPEC["properties"]["conformance_sha256"]
 
 
 def test_the_dump_protocol_lists_both_implementations():

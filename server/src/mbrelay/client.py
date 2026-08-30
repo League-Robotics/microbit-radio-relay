@@ -130,3 +130,139 @@ def interactive(sock: socket.socket, escape: str = "]", raw: bool = True,
         if logfile:
             logfile.close()
         sock.close()
+
+
+# -- connecting to a robot by name -------------------------------------------
+#
+# `mbrelay connect tovez`: name the ROBOT, not the relay. The client takes a
+# relay from the pool, tunes it to the robot's derived link with `!N <name>`
+# (protocol §3.7), enters the data plane, and hands over a terminal in which
+# every line typed goes to the robot. No channel, no group, no port.
+
+import re
+from dataclasses import dataclass
+
+from .naming import NAME_RE, normalize
+
+
+class RobotTuneError(Exception):
+    """The relay could not be put on the robot's link."""
+
+
+@dataclass(frozen=True)
+class ConnectTarget:
+    """What `mbrelay connect <target>` asked for.
+
+    ``tovez``            robot tovez; the relay host comes from config or discovery
+    ``tovez@torture``    robot tovez through the relay host torture (port 8760)
+    ``torture``, ``torture:8760``, ``""``   a relay host (or none), no robot
+    """
+    robot: str | None
+    host: str | None
+    port: int | None
+
+    @property
+    def endpoint(self) -> str | None:
+        return f"{self.host}:{self.port}" if self.host else None
+
+
+def parse_connect_target(target: str | None, default_port: int = DEFAULT_PORT) -> ConnectTarget:
+    text = (target or "").strip()
+    robot, at, rest = text.partition("@")
+    if at:
+        name = normalize(robot)
+        if not NAME_RE.match(name):
+            raise ValueError(f"{robot!r} is not a micro:bit name (five letters, e.g. tovez)")
+        host, port = parse_target(rest, default_port)
+        return ConnectTarget(name, host, port)
+    name = normalize(text)
+    if NAME_RE.match(name):
+        return ConnectTarget(name, None, None)
+    if not text:
+        return ConnectTarget(None, None, None)
+    host, port = parse_target(text, default_port)
+    return ConnectTarget(None, host, port)
+
+
+_BANNER_RE = re.compile(rb"DEVICE:\w+:relay:([^:\r\n]+):")
+_REPLY_RE = re.compile(rb"#\s*(?:channel:|error:)[^\r\n]*\r?\n")
+_TUNED_RE = re.compile(rb"#\s*channel:\s*(\d+)\s+group:\s*(\d+).*?\bname:\s*(\S+)")
+_GO_RE = re.compile(rb"#\s*entering data plane[^\r\n]*\r?\n")
+_PONG_RE = re.compile(rb"\bpong\b")
+
+
+def _read_until(sock: socket.socket, pattern: re.Pattern, timeout: float):
+    """Read until `pattern` matches or `timeout` elapses; (match, everything read)."""
+    buf = bytearray()
+    deadline = time.monotonic() + timeout
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        sock.settimeout(min(0.25, left))
+        try:
+            chunk = sock.recv(4096)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf.extend(chunk)
+        match = pattern.search(buf)
+        if match:
+            return match, bytes(buf)
+    return None, bytes(buf)
+
+
+@dataclass
+class Tuned:
+    relay: str          # the relay board's name, from its banner
+    channel: int
+    group: int
+    answered: bool | None   # did the robot answer PING? None = not probed
+
+
+def tune_to_robot(sock: socket.socket, robot: str, *, timeout: float = 8.0,
+                  settle: float = 0.5, probe: bool = True, out=sys.stderr) -> Tuned:
+    """Put a freshly acquired relay on `robot`'s link and enter the data plane.
+
+    One line, then its reply, then the next: the firmware can drop bytes of
+    the following line while it retunes the radio, so this never bursts.
+    """
+    banner, _ = _read_until(sock, _BANNER_RE, timeout)
+    relay = banner.group(1).decode(errors="replace") if banner else "?"
+    time.sleep(settle)
+
+    sock.sendall(f"!N {robot}\n".encode())
+    reply, seen = _read_until(sock, _REPLY_RE, timeout)
+    if reply is None:
+        raise RobotTuneError(f"relay {relay} did not answer !N {robot} within {timeout:.0f}s"
+                             + (f": {seen[-120:]!r}" if seen else ""))
+    line = reply.group(0).strip().decode(errors="replace")
+    tuned = _TUNED_RE.search(reply.group(0))
+    if tuned is None:
+        if "unknown command" in line:
+            raise RobotTuneError(f"relay {relay} runs firmware that predates !N (protocol 3.7); reflash it")
+        raise RobotTuneError(f"relay {relay} refused !N {robot}: {line}")
+    channel, group = int(tuned.group(1)), int(tuned.group(2))
+    out.write(f"mbrelay: relay {relay} tuned to {robot}: channel {channel} group {group}\n")
+
+    time.sleep(settle)
+    sock.sendall(b"!GO\n")
+    if _read_until(sock, _GO_RE, timeout)[0] is None:
+        raise RobotTuneError(f"relay {relay} did not enter the data plane")
+
+    answered = None
+    if probe:
+        # League robot firmware answers PING with "pong <ms>" and needs no
+        # sequence id, so this is the cheapest proof that someone is listening.
+        time.sleep(settle)
+        sock.sendall(b"PING\n")
+        answered = _read_until(sock, _PONG_RE, 2.0)[0] is not None
+        if answered:
+            out.write(f"mbrelay: {robot} answered PING\n")
+        else:
+            out.write(f"mbrelay: no answer from {robot} on channel {channel} group {group} "
+                      "-- is it powered, in range, and running self-addressing firmware?\n")
+    return Tuned(relay, channel, group, answered)

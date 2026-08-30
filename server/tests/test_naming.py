@@ -19,13 +19,37 @@ from fake_relay import FakeRelayFirmware
 SPEC = json.loads(pathlib.Path(__file__).with_name("radio-address-vectors.json").read_text())
 
 
-def test_the_whole_name_space_matches_the_published_digest():
-    """One constant proves byte identity with the spec across all 3125 names."""
-    digest = hashlib.sha256(naming.canonical_form().encode()).hexdigest()
-    probe = SPEC["properties"]["endianness_probe"]
-    assert digest != probe["reversed_encoder_digest"], \
-        "the encoder is little-endian: name[0] must be the MOST significant digit"
-    assert digest == SPEC["properties"]["full_space_sha256"]
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def test_the_conformance_gate_d2_exercises_the_decoder_the_relay_runs():
+    """D2 hashes decode(name) and reverse(channel, group) for every name. It is
+    the gate because decode() is what `!N <name>` executes, and D1 never
+    calls it: a little-endian decoder passes D1 while being wrong on 96% of
+    names. The spec publishes that exact fault's D2 so it is nameable."""
+    props = SPEC["properties"]
+    d2 = _sha(naming.canonical_form(version=2))
+    assert d2 != props["conformance_sha256_broken_decode"]["digest"], \
+        "the DECODER is little-endian: name[0] must be the MOST significant digit"
+    assert d2 == props["conformance_sha256"]
+
+
+def test_the_forward_only_digest_d1_still_holds_as_a_bisector():
+    """D2 failing while D1 passes localises a fault to decode/reverse."""
+    d1 = _sha(naming.canonical_form(version=1))
+    assert d1 != SPEC["properties"]["endianness_probe"]["reversed_encoder_digest"], \
+        "the ENCODER is little-endian"
+    assert d1 == SPEC["properties"]["full_space_sha256"]
+
+
+def test_a_well_formed_name_no_board_uses_is_still_an_address():
+    """Malformed is not unknown. `pipip` belongs to no board, but it is a legal
+    retune to a quiet pair; the address layer does not know which boards
+    exist and must not pretend to (that is the deploy-time silicon gate)."""
+    assert name_to_radio("pipip") == (51, 90)
+    with pytest.raises(ValueError):
+        name_to_radio("robot1")            # malformed: no address exists
 
 
 @pytest.mark.parametrize("v", SPEC["vectors"], ids=lambda v: v["name"])

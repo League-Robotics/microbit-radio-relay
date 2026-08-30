@@ -260,6 +260,10 @@ the name (`!N?` then answers `# name: -`).
 `name:` is always the **last** field of the config line, so a parser anchored on
 `# channel:` — every existing one — is unaffected.
 
+You rarely type any of this yourself: `mbrelay connect tovez` takes a relay from
+the pool, sends `!N tovez`, enters the data plane and hands you a terminal on
+the robot — no channel, group, host or port.
+
 **The mapping** is owned by pxt-nezha-diffdrive (`docs/radio-addressing.md`,
 normative, with the machine-readable `docs/radio-address-vectors.json`). This
 firmware (`nameToRadio` in `source/relay/RadioRelay.cpp`) and the server (`server/src/mbrelay/naming.py`) implement the same

@@ -112,7 +112,31 @@ def radio_to_name(channel: int, group: int) -> str:
     return encode(CHANNELS * (g - 1) + (channel - CHANNEL_MIN) // CHANNEL_STEP)
 
 
-def canonical_form() -> str:
-    """The spec's full-space canonical form: for n = 0..3124 in order, one line
-    ``<name>,<channel>,<group>\\n``. Its sha256 is the three-repo contract."""
-    return "".join(f"{encode(n)},{address(n)[0]},{address(n)[1]}\n" for n in range(SPACE))
+def canonical_form(version: int = 2) -> str:
+    """The spec's canonical full-space form, one line per name for n = 0..3124
+    in order. Its sha256 is the three-repo contract.
+
+    version 2 (the conformance gate, ``$.properties.conformance_sha256``):
+    ``<name>,<channel>,<group>,<decode(name)>,<reverse(channel,group)>`` --
+    the last two columns are always n, which is the point: every line forces
+    the decoder (what ``!N <name>`` actually runs) and the reverse map to
+    execute and hashes their output. A little-endian decoder is wrong on 96%
+    of names and passes version 1 unchanged; against version 2 it yields the
+    spec's published broken-decode digest and fails loudly.
+
+    version 1 (``$.properties.full_space_sha256``): the first three columns
+    only. Kept as a bisector -- version 2 failing while 1 passes localises the
+    fault to decode/reverse.
+    """
+    if version not in (1, 2):
+        raise ValueError(f"unknown canonical form version {version}")
+    lines = []
+    for n in range(SPACE):
+        name = encode(n)
+        channel, group = address(n)
+        if version == 1:
+            lines.append(f"{name},{channel},{group}\n")
+        else:
+            back = decode(radio_to_name(channel, group))
+            lines.append(f"{name},{channel},{group},{decode(name)},{back}\n")
+    return "".join(lines)

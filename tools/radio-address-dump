@@ -9,9 +9,15 @@ vendorable) can compare every implementation in every repo:
     tools/radio-address-dump --list
         one implementation id per line, e.g. "python", "firmware-cpp",
         "makecode-ts"
-    tools/radio-address-dump <id>
-        the spec's canonical form on stdout: for n = 0..3124 in order, one line
-        "<name>,<channel>,<group>" -- 3125 lines, nothing else. Exit 0.
+    tools/radio-address-dump <id> [1|2]
+        the spec's canonical form on stdout for n = 0..3124 in order, 3125
+        lines, nothing else, exit 0. Dump protocol v2 (default, PREFERRED):
+        "<name>,<channel>,<group>,<decode(name)>,<reverse(channel,group)>",
+        whose sha256 is the spec's conformance_sha256 (D2) -- the last two
+        columns are always n, so the decoder (what !N runs) and the reverse
+        map are exercised and hashed, not merely self-checked. "1" selects
+        the three-column v1 form (full_space_sha256, D1). A checker tells
+        them apart by column count.
         If that implementation cannot run on this machine (no compiler, no
         toolchain), print one line to stderr and exit 3; the checker reports
         it as unavailable rather than as a mismatch.
@@ -37,14 +43,14 @@ ROOT = Path(__file__).resolve().parents[1]
 UNAVAILABLE = 3
 
 
-def dump_python() -> int:
+def dump_python(version: int) -> int:
     sys.path.insert(0, str(ROOT / "server" / "src"))
     from mbrelay.naming import canonical_form
-    sys.stdout.write(canonical_form())
+    sys.stdout.write(canonical_form(version))
     return 0
 
 
-def dump_firmware_cpp() -> int:
+def dump_firmware_cpp(version: int) -> int:
     cxx = shutil.which("c++") or shutil.which("g++") or shutil.which("clang++")
     if cxx is None:
         print("firmware-cpp: no host C++ compiler (c++/g++/clang++) on PATH", file=sys.stderr)
@@ -59,7 +65,7 @@ def dump_firmware_cpp() -> int:
         if build.returncode != 0:
             sys.stderr.write(build.stderr)
             return 1
-        run = subprocess.run([str(exe)], capture_output=True, text=True)
+        run = subprocess.run([str(exe), str(version)], capture_output=True, text=True)
         sys.stdout.write(run.stdout)
         sys.stderr.write(run.stderr)
         return run.returncode
@@ -72,7 +78,7 @@ IMPLEMENTATIONS = {
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 1 or argv[0] in ("-h", "--help"):
+    if not argv or argv[0] in ("-h", "--help") or len(argv) > 2:
         print(__doc__, file=sys.stderr)
         return 2
     if argv[0] == "--list":
@@ -82,7 +88,11 @@ def main(argv: list[str]) -> int:
     if impl is None:
         print(f"unknown implementation {argv[0]!r}; try --list", file=sys.stderr)
         return 2
-    return impl()
+    version = int(argv[1]) if len(argv) == 2 else 2
+    if version not in (1, 2):
+        print("version must be 1 or 2", file=sys.stderr)
+        return 2
+    return impl(version)
 
 
 if __name__ == "__main__":
