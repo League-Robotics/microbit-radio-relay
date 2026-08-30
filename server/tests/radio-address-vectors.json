@@ -1,0 +1,216 @@
+{
+  "$comment": "GENERATED companion to docs/radio-addressing.md. That document is normative; this file is the machine-readable contract other repos assert against. Do not hand-edit.",
+  "spec": "docs/radio-addressing.md",
+  "version": "1.0.0",
+  "algorithm": {
+    "consonants_at_positions_0_2_4": "zvgpt",
+    "vowels_at_positions_1_3": "uoiea",
+    "decode": "n = 0; for p in 0..4: n = n*5 + index_in_alphabet(name[p])",
+    "channel": "25 + 2 * (n % 25)",
+    "group": "g = 1 + (n / 25); if g >= 10: g += 1",
+    "normalize": "trim ASCII whitespace; map A-Z to a-z",
+    "accept": "^[zvgpt][uoiea][zvgpt][uoiea][zvgpt]$",
+    "encode": "n -> name, the inverse of decode: for p = 4 down to 0: name[p] = alphabet(p)[n % 5]; n = n / 5",
+    "endianness": "name[0] is the MOST significant base-5 digit and name[4] the LEAST. Base-5 conversion naturally emits least-significant first, so a naive encoder produces reversed names: n=1 is 'zuzuv', not 'vuzuz'. The error is diagnostic-free -- 3125 well-formed, regex-passing, distinct names in the wrong order."
+  },
+  "ranges": {
+    "n": [
+      0,
+      3124
+    ],
+    "channel": {
+      "min": 25,
+      "max": 73,
+      "step": 2,
+      "count": 25,
+      "floor_is_inclusive": true,
+      "note": "25 is a VALID channel and zeguz occupies it"
+    },
+    "group": {
+      "values": "1..9 and 11..126",
+      "count": 125,
+      "excluded": [
+        0,
+        10
+      ]
+    }
+  },
+  "reserved": {
+    "channels_never_emitted": [
+      3,
+      4,
+      7
+    ],
+    "groups_never_emitted": [
+      0,
+      10
+    ],
+    "why": {
+      "3,4,10": "legacy fleet convention (ch 3/4 + group 10)",
+      "7,0": "MakeCode's unconfigured default (band 7 + group 0)",
+      "10": "microbit-radio-relay's !C button space forces group 10 across channels 0-35"
+    }
+  },
+  "properties": {
+    "total_names": 3125,
+    "distinct_pairs": 3125,
+    "names_per_channel": 125,
+    "names_per_group": 25,
+    "injective": true,
+    "full_space_sha256": "a1069d8503f83873ab79b97c063ff95f300b34a35a03d83848888cc361bbde31",
+    "full_space_canonical_form": "for n = 0..3124 in order, one line '<name>,<channel>,<group>\\n', UTF-8, sha256 of the concatenation",
+    "endianness_probe": {
+      "vector": "zotuz",
+      "why": "Digit-palindrome names are IDENTICAL under both orderings and cannot detect a reversed encoder. zuzuz, tatat, zotoz and pipip are all palindromes -- including both extremes, which is what an implementer reaches for first. zotuz (n=225) reverses to zutoz and is the published vector that catches it.",
+      "reversed_encoder_digest": "52ea4a6e6124cdebbb56639d21db15b48f95d54aeb38ce93f7df9e7f9fbeb8dc",
+      "reversed_encoder_digest_note": "If your digest equals THIS value, your encoder is little-endian; reverse the digit order."
+    }
+  },
+  "reject": [
+    "gauti",
+    "vevo",
+    "vevovv",
+    "aeiou",
+    "",
+    "TOVEZZ"
+  ],
+  "normalize_equivalent": {
+    "VEVOV": "vevov",
+    " vevov ": "vevov"
+  },
+  "vectors": [
+    {
+      "name": "getez",
+      "n": 1740,
+      "channel": 55,
+      "group": 71,
+      "device_id": 1784514240,
+      "role": "RADIOBRIDGE",
+      "evidence": "silicon"
+    },
+    {
+      "name": "gopiv",
+      "n": 1461,
+      "channel": 47,
+      "group": 60,
+      "device_id": 2175407711,
+      "role": "NEZHA2",
+      "evidence": "silicon"
+    },
+    {
+      "name": "tovez",
+      "n": 2665,
+      "channel": 55,
+      "group": 108,
+      "device_id": 2314287040,
+      "role": "NEZHA2",
+      "evidence": "silicon"
+    },
+    {
+      "name": "vevov",
+      "n": 1031,
+      "channel": 37,
+      "group": 43,
+      "device_id": 1198504156,
+      "role": "NEZHA2",
+      "evidence": "silicon"
+    },
+    {
+      "name": "zavaz",
+      "n": 545,
+      "channel": 65,
+      "group": 23,
+      "device_id": 4076631795,
+      "role": "RADIOBRIDGE",
+      "evidence": "silicon"
+    },
+    {
+      "name": "zeguz",
+      "n": 425,
+      "channel": 25,
+      "group": 19,
+      "device_id": 4227700425,
+      "role": "NEZHA2",
+      "evidence": "silicon"
+    },
+    {
+      "name": "zetuv",
+      "n": 476,
+      "channel": 27,
+      "group": 21,
+      "device_id": 1468666101,
+      "role": "NEZHA2",
+      "evidence": "silicon"
+    },
+    {
+      "name": "togov",
+      "n": 2681,
+      "channel": 37,
+      "group": 109,
+      "device_id": null,
+      "role": "NEZHA2",
+      "evidence": "label-only",
+      "note": "never probed; absent from every device registry in both repos. Confirm with read_board_name() on first connection."
+    },
+    {
+      "name": "zuzuz",
+      "n": 0,
+      "channel": 25,
+      "group": 1,
+      "device_id": null,
+      "role": null,
+      "evidence": "synthetic",
+      "note": "minimum, n=0"
+    },
+    {
+      "name": "zuzuv",
+      "n": 1,
+      "channel": 27,
+      "group": 1,
+      "device_id": null,
+      "role": null,
+      "evidence": "synthetic",
+      "note": "n=1, the simplest ASYMMETRIC vector: reverses to vuzuz, so it fails loudly against a little-endian encoder where zuzuz and tatat both pass"
+    },
+    {
+      "name": "zotuz",
+      "n": 225,
+      "channel": 25,
+      "group": 11,
+      "device_id": null,
+      "role": null,
+      "evidence": "synthetic",
+      "note": "group-skip boundary; would have been group 10"
+    },
+    {
+      "name": "zotoz",
+      "n": 230,
+      "channel": 35,
+      "group": 11,
+      "device_id": null,
+      "role": null,
+      "evidence": "synthetic",
+      "note": "top of the relay !C button space (channel 35)"
+    },
+    {
+      "name": "pipip",
+      "n": 2213,
+      "channel": 51,
+      "group": 90,
+      "device_id": null,
+      "role": null,
+      "evidence": "synthetic",
+      "note": "interior"
+    },
+    {
+      "name": "tatat",
+      "n": 3124,
+      "channel": 73,
+      "group": 126,
+      "device_id": null,
+      "role": null,
+      "evidence": "synthetic",
+      "note": "maximum, n=3124"
+    }
+  ]
+}

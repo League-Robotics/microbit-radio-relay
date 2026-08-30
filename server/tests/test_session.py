@@ -465,11 +465,11 @@ async def test_a_link_selected_by_name_is_visible(manager):
     session.attach(sink=lambda d: None, on_gone=lambda exc: None)
 
     session.write_to_board(b"!N Tovez\n")
-    assert session.radio_channel == name_to_radio("tovez")[0] == 69
+    assert session.radio_channel == name_to_radio("tovez")[0] == 55
     assert session.to_json()["name"] == "tovez"
 
     session.write_to_board(b"!N?\n")                 # a query, not a selection
-    assert (session.radio_channel, session.radio_name) == (69, "tovez")
+    assert (session.radio_channel, session.radio_name) == (55, "tovez")
 
     session.write_to_board(b"!C 3\n")                # a number forgets the name
     assert (session.radio_channel, session.radio_name) == (3, None)
@@ -490,8 +490,8 @@ async def test_a_named_link_and_a_numbered_one_on_one_channel_collide(manager, c
     for s in (a, b):
         s.attach(sink=lambda d: None, on_gone=lambda exc: None)
 
-    a.write_to_board(b"!N tovez\n")                  # channel 69
+    a.write_to_board(b"!N tovez\n")                  # channel 55
     with caplog.at_level("WARNING"):
-        b.write_to_board(b"!CG 69 10\n")
+        b.write_to_board(b"!CG 55 10\n")
     assert any("channel_collision" in r.message for r in caplog.records), \
         [r.message for r in caplog.records]

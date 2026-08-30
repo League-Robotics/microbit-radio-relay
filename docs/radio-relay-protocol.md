@@ -235,53 +235,70 @@ The 5×5 display reflects state:
 
 ### 3.7 Named links
 
-A robot running the League firmware derives its radio link from its own
-micro:bit name (the CODAL friendly name, e.g. `tovez`), so the host never needs
-to know the numbers. `!N <name>` puts the relay on the same link:
+A micro:bit's five-letter name **is** its radio address: the CODAL friendly
+name is `NRF_FICR->DEVICEID[1]` written in base 5, so a robot derives its own
+`(channel, group)` at boot, and anyone who knows the name derives the same pair
+— no registry, no allocation. `!N <name>` retunes the relay to that pair:
 
 ```
 !N tovez
-# channel: 69 group: 214 mode: RAW250 power: 7 name: tovez
+# channel: 55 group: 108 mode: RAW250 power: 7 name: tovez
 ```
 
 The name is trimmed and lower-cased (`TOVEZ`, ` tovez ` and `tovez` are one
-robot) and must be 1–15 printable ASCII characters with no spaces; anything else
-is answered with `# error: usage !N <name>`. The link is applied and persisted
-exactly like `!CG`, and the name is persisted with it, so `?` keeps reporting
-`name: <name>` after a reset and `!N?` answers `# name: tovez`. `!C`, `!CG`/`!RC`
-and the A/B buttons choose a link by *number* and therefore forget the name
-(`!N?` then answers `# name: -`).
+board) and must match exactly `[zvgpt][uoiea][zvgpt][uoiea][zvgpt]`; anything
+else is answered with `# error: usage !N <name>`. The link is applied and
+persisted exactly like `!CG`, and the name is persisted with it, so `?` keeps
+reporting `name: <name>` after a reset and `!N?` answers `# name: tovez`. `!C`,
+`!CG`/`!RC` and the A/B buttons choose a link by *number* and therefore forget
+the name (`!N?` then answers `# name: -`).
 
 `name:` is always the **last** field of the config line, so a parser anchored on
 `# channel:` — every existing one — is unaffected.
 
-**The mapping** is a contract shared by this firmware (`nameToRadio` in
-[`RadioRelay.cpp`](../source/relay/RadioRelay.cpp)), the server ([`naming.py`](../server/src/mbrelay/naming.py)) and the robot's MakeCode extension
-(pxt-nezha-diffdrive); all three assert the same vector table.
+**The mapping** is owned by pxt-nezha-diffdrive (`docs/radio-addressing.md`,
+normative, with the machine-readable `docs/radio-address-vectors.json`). This
+firmware (`nameToRadio` in [`RadioRelay.cpp`](../source/relay/RadioRelay.cpp)) and the server ([`naming.py`](../server/src/mbrelay/naming.py)) implement the same
+steps; the server's tests mirror the vectors file and check the **entire
+3125-name space** against its published sha256 rather than a sampled table.
 
-1. `h = 0`; for each byte `b` of the normalized name: `h = (h × 31 + b) mod 65521`
-2. `channel = h mod 84` → 0–83
-3. `g = (h div 84) mod 254`; if `g ≥ 10` then `g = g + 1` → 0–9, 11–254
+```
+positions 0, 2, 4   consonant   z v g p t   = 0 1 2 3 4
+positions 1, 3      vowel       u o i e a   = 0 1 2 3 4
 
-Every intermediate is below 2²¹, so MakeCode's static TypeScript (IEEE doubles,
-no `Math.imul`) computes it exactly. **Group 10 is never produced**: it is the
-`!C`/button space (§3.5), so a relay dialled by hand can never silently share a
-named robot's link, and `?` on the display always means a custom or named link.
+n       = base5(name)          # name[0] is the MOST significant digit, 0–3124
+channel = 25 + 2 * (n mod 25)  # 25, 27, … 73
+group   = 1 + (n div 25)       # then: if group ≥ 10, group = group + 1 → 1–9, 11–126
+```
 
-| name       | channel | group |
-| ---------- | ------- | ----- |
-| `getez`    | 64      | 107   |
-| `zavaz`    | 3       | 119   |
-| `tovez`    | 69      | 214   |
-| `vevov`    | 20      | 212   |
-| `gopiv`    | 78      | 235   |
-| `a`        | 13      | 1     |
-| `microbit` | 25      | 196   |
+Every intermediate is 0–3124, so MakeCode int32, C++ `int` and Python agree
+with no shifts or negative modulo. The map is a bijection: 3125 names → 3125
+distinct pairs, 125 names per channel, 25 per group. It **never emits channels
+3, 4 or 7, nor groups 0 or 10** — channels 3/4 with group 10 are the legacy
+hand-allocated fleet, band 7 with group 0 is MakeCode's unconfigured default,
+and group 10 is this relay's `!C`/button space (§3.5). So a hand-dialled `!C`
+can never land on a derived link, `?` on the display always means a custom or
+named link — and `!C` cannot reach a named board at all; only `!CG` or `!N` can.
 
-Over the 3125 possible CODAL friendly names the mapping yields 3005 distinct
-links (worst case three names on one), so a room of twenty robots has under a 1%
-chance of any two sharing a link — and both ends print the pair, so a collision
-is visible rather than silent.
+| name    | n    | channel | group | board                           |
+| ------- | ---- | ------- | ----- | ------------------------------- |
+| `zeguz` | 425  | 25      | 19    | robot (channel 25 is inclusive) |
+| `zetuv` | 476  | 27      | 21    | robot                           |
+| `vevov` | 1031 | 37      | 43    | robot                           |
+| `gopiv` | 1461 | 47      | 60    | bench rig                       |
+| `getez` | 1740 | 55      | 71    | relay                           |
+| `zavaz` | 545  | 65      | 23    | relay                           |
+| `tovez` | 2665 | 55      | 108   | robot                           |
+
+A relay has no address of its own — it adopts the robot's, so `getez` serving
+`tovez` tunes to 55/108 and its own pair never goes on air. Two *robots* on one
+channel (`vevov` and `togov` both derive 37) contend for airtime even though
+neither parses the other's traffic; the group is only an address filter.
+
+> **Endianness.** Base-5 conversion naturally emits the least significant digit
+> first, but the name is big-endian. A reversed encoder still yields 3125
+> well-formed, distinct names — silently wrong. `zuzuv` is n = 1 (a reversed
+> encoder says `vuzuz`); palindromes like `zuzuz` or `zavaz` cannot catch it.
 
 ---
 
@@ -442,5 +459,6 @@ standalone-peer echo/MAKECODE tests are the other `scripts/*_test.py` files.
 8. **Reliability** — fire-and-forget today; the `ACK_REQ`/`ACK` responder is
    wired, the stop-and-wait sender is the next step. (§5.3)
 9. **Named links** — *Implemented:* `!N <name>` / `!N?`, name persisted with the
-   config (record v2). The mapping is shared with mbrelay and the robot
-   extension; the vector table is the contract. (§3.7)
+   config (record v2). The mapping is pxt-nezha-diffdrive's normative
+   radio-addressing spec; the server tests assert the whole name space
+   against its published digest. (§3.7)

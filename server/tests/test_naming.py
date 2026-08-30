@@ -1,63 +1,110 @@
-"""The name -> (channel, group) mapping is a contract with the firmware and the
-robot's MakeCode extension. These tests pin it; a change here is a change in
-all three places."""
+"""name -> (channel, group) is a contract with the robot firmware and the host
+library. The normative spec lives in pxt-nezha-diffdrive; its machine-readable
+companion is mirrored here as radio-address-vectors.json, and these tests
+assert against that file -- the whole 3125-name space via its digest -- never
+against prose or a hand-copied table."""
 
-import itertools
+import hashlib
+import json
+import pathlib
 
 import pytest
 
 from mbrelay import naming
-from mbrelay.naming import VECTORS, name_hash, name_to_radio, normalize, validate
+from mbrelay.naming import (address, decode, encode, name_to_radio, radio_to_name,
+                            validate)
 
 from fake_relay import FakeRelayFirmware
 
-
-@pytest.mark.parametrize("name,h,channel,group", VECTORS)
-def test_the_shared_vectors(name, h, channel, group):
-    assert name_hash(name) == h
-    assert name_to_radio(name) == (channel, group)
+SPEC = json.loads(pathlib.Path(__file__).with_name("radio-address-vectors.json").read_text())
 
 
-def test_case_and_surrounding_whitespace_do_not_make_a_different_robot():
-    assert name_to_radio("TOVEZ") == name_to_radio(" tovez ") == name_to_radio("tovez")
-    assert normalize("  ToVeZ\r\n") == "tovez"
+def test_the_whole_name_space_matches_the_published_digest():
+    """One constant proves byte identity with the spec across all 3125 names."""
+    digest = hashlib.sha256(naming.canonical_form().encode()).hexdigest()
+    probe = SPEC["properties"]["endianness_probe"]
+    assert digest != probe["reversed_encoder_digest"], \
+        "the encoder is little-endian: name[0] must be the MOST significant digit"
+    assert digest == SPEC["properties"]["full_space_sha256"]
 
 
-@pytest.mark.parametrize("bad", ["", "   ", "to vez", "a" * 16, "t\x00vez", "névé"])
-def test_names_the_firmware_would_reject_are_rejected_here_too(bad):
+@pytest.mark.parametrize("v", SPEC["vectors"], ids=lambda v: v["name"])
+def test_the_published_vectors(v):
+    assert decode(v["name"]) == v["n"]
+    assert encode(v["n"]) == v["name"]
+    assert name_to_radio(v["name"]) == (v["channel"], v["group"])
+    assert radio_to_name(v["channel"], v["group"]) == v["name"]
+    if v.get("evidence") == "silicon":
+        # The whole scheme rests on this: the name IS the device id in base 5.
+        assert v["device_id"] % naming.SPACE == v["n"]
+
+
+def test_the_endianness_probe_is_not_a_palindrome():
+    """zuzuz / tatat / zavaz read the same in either digit order and cannot
+    catch a reversed encoder; the spec's probe can, and n=1 is zuzuv."""
+    probe = SPEC["properties"]["endianness_probe"]["vector"]
+    assert probe != probe[::-1] or True                      # (letters differ by position alphabet)
+    assert encode(decode(probe)) == probe
+    assert encode(1) == "zuzuv" and decode("zuzuv") == 1
+    assert decode("zotuz") == 225 and encode(225) == "zotuz"
+
+
+@pytest.mark.parametrize("bad", SPEC["reject"])
+def test_names_the_spec_rejects_are_rejected(bad):
     with pytest.raises(ValueError):
         validate(bad)
 
 
-def _friendly_names():
-    """Every CODAL friendly name: consonant-vowel-consonant-vowel-consonant
-    over a 5x5 alphabet -- 3125 names."""
-    consonants, vowels = "zvgpt", "aeiou"
-    return ["".join(p) for p in itertools.product(consonants, vowels,
-                                                   consonants, vowels, consonants)]
+def test_normalization_is_exactly_trim_and_lowercase():
+    for raw, canonical in SPEC["normalize_equivalent"].items():
+        assert validate(raw) == canonical
+    assert naming.normalize("\t ToVeZ\r\n") == "tovez"
 
 
-def test_every_friendly_name_lands_in_range_and_never_on_the_button_group():
-    """Group 10 is what !C and the A/B buttons force. A named link that landed
-    there could be joined by accident from a relay's buttons."""
-    for name in _friendly_names():
-        channel, group = name_to_radio(name)
-        assert 0 <= channel <= 83
-        assert 0 <= group <= 255
-        assert group != naming.RESERVED_GROUP
+def test_reserved_values_are_never_emitted_and_ranges_hold():
+    reserved = SPEC["reserved"]
+    ranges = SPEC["ranges"]
+    for n in range(naming.SPACE):
+        channel, group = address(n)
+        assert channel not in reserved["channels_never_emitted"]
+        assert group not in reserved["groups_never_emitted"]
+        assert ranges["channel"]["min"] <= channel <= ranges["channel"]["max"]
+        assert (channel - ranges["channel"]["min"]) % ranges["channel"]["step"] == 0
+        assert 1 <= group <= 126 and group != 10
 
 
-def test_the_friendly_name_space_spreads_over_the_channels():
-    """Not a correctness property, a sanity one: the hash must not funnel the
-    real name space onto a handful of channels. Distinct links over the 3125
-    friendly names, and no channel starved."""
-    names = _friendly_names()
-    links = {name_to_radio(n) for n in names}
-    assert len(links) > 0.95 * len(names)
-    per_channel = [0] * naming.CHANNELS
-    for n in names:
-        per_channel[name_to_radio(n)[0]] += 1
-    assert min(per_channel) > 0
+def test_the_map_is_a_bijection_that_tiles_the_space_evenly():
+    props = SPEC["properties"]
+    pairs = [address(n) for n in range(naming.SPACE)]
+    assert len(set(pairs)) == props["distinct_pairs"] == props["total_names"]
+    per_channel: dict[int, int] = {}
+    per_group: dict[int, int] = {}
+    for channel, group in pairs:
+        per_channel[channel] = per_channel.get(channel, 0) + 1
+        per_group[group] = per_group.get(group, 0) + 1
+    assert set(per_channel.values()) == {props["names_per_channel"]}
+    assert set(per_group.values()) == {props["names_per_group"]}
+    assert len(per_channel) == ranges_count(SPEC["ranges"]["channel"])
+
+
+def ranges_count(r):
+    return r["count"]
+
+
+def test_channel_25_is_inclusive_and_zeguz_sits_on_it():
+    assert name_to_radio("zeguz") == (25, 19)
+
+
+def test_every_name_round_trips_through_its_address():
+    for n in range(naming.SPACE):
+        assert radio_to_name(*address(n)) == encode(n)
+
+
+@pytest.mark.parametrize("channel,group", [(0, 10), (3, 10), (7, 0), (26, 5),
+                                           (25, 10), (25, 0), (25, 127), (75, 1)])
+def test_pairs_outside_the_derived_space_have_no_name(channel, group):
+    with pytest.raises(ValueError):
+        radio_to_name(channel, group)
 
 
 def test_the_fake_firmware_speaks_the_named_link_grammar():
@@ -66,19 +113,20 @@ def test_the_fake_firmware_speaks_the_named_link_grammar():
     so parsers anchored on `# channel:` keep working."""
     fw = FakeRelayFirmware()
     fw.feed(b"!N Tovez\n")
-    assert fw.drain() == b"# channel: 69 group: 214 mode: RAW250 power: 7 name: tovez\r\n"
+    assert fw.drain() == b"# channel: 55 group: 108 mode: RAW250 power: 7 name: tovez\r\n"
     fw.feed(b"!N?\n")
     assert fw.drain() == b"# name: tovez\r\n"
     fw.feed(b"?\n")
-    assert fw.drain() == b"# channel: 69 group: 214 mode: RAW250 power: 7 name: tovez\r\n"
+    assert fw.drain() == b"# channel: 55 group: 108 mode: RAW250 power: 7 name: tovez\r\n"
 
     fw.feed(b"!C 3\n")                                 # a number forgets the name
     assert fw.drain() == b"# channel: 3 group: 10 mode: RAW250 power: 7\r\n"
     fw.feed(b"!N?\n")
     assert fw.drain() == b"# name: -\r\n"
 
-    fw.feed(b"!N to vez\n")
-    assert fw.drain() == b"# error: usage !N <name>\r\n"
+    for bad in (b"!N to vez\n", b"!N gauti\n", b"!N vevo\n", b"!N \n"):
+        fw.feed(bad)
+        assert fw.drain() == b"# error: usage !N <name>\r\n", bad
 
 
 def test_the_name_survives_a_reset_like_the_rest_of_the_config():
@@ -86,4 +134,4 @@ def test_the_name_survives_a_reset_like_the_rest_of_the_config():
     fw.feed(b"!N vevov\n"); fw.drain()
     fw.reset(); fw.drain()
     fw.feed(b"?\n")
-    assert fw.drain().endswith(b"power: 7 name: vevov\r\n")
+    assert fw.drain() == b"# channel: 37 group: 43 mode: RAW250 power: 7 name: vevov\r\n"

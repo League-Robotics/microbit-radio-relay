@@ -144,9 +144,8 @@ namespace
     // ---------------------------------------------------------------------
     // Relay state
     // ---------------------------------------------------------------------
-    // Longest name `!N` accepts. CODAL friendly names are 5 chars; the bound is
-    // what the flash record (StoredConfig) has room for.
-    constexpr int kNameMax = 15;
+    // A micro:bit name is exactly five letters (§3.7).
+    constexpr int kNameLen = 5;
 
     struct Config
     {
@@ -155,7 +154,7 @@ namespace
         int  power   = kDefaultPower;
         Mode mode    = MODE_RAW250;  // default 250-byte mode (old MakeCode relays retired)
         bool frag    = false;       // MAKECODE over-length policy: fragment vs truncate
-        char name[kNameMax + 1] = {0};  // §3.7: set by !N; "" once !C/!CG/buttons pick a number
+        char name[kNameLen + 1] = {0};  // §3.7: set by !N; "" once !C/!CG/buttons pick a number
     };
 
     Config cfg;
@@ -191,7 +190,7 @@ namespace
         uint8_t mode;       // MODE_MAKECODE / MODE_RAW250
         uint8_t frag;
         uint8_t echo;
-        char    name[kNameMax + 1];   // §3.7, NUL-terminated; "" = link not chosen by name
+        char    name[kNameLen + 1];   // §3.7, NUL-terminated; "" = link not chosen by name
     };
     // The KeyValueStorage value slot is 32 bytes (48-byte block minus 16-byte key).
     static_assert(sizeof(StoredConfig) <= 32, "relaycfg record no longer fits a KeyValuePair");
@@ -244,7 +243,7 @@ namespace
         cfg.frag  = sc.frag != 0;
         echoMode  = sc.echo != 0;
         memcpy(cfg.name, sc.name, sizeof(cfg.name));
-        cfg.name[kNameMax] = 0;             // never trust flash to terminate
+        cfg.name[kNameLen] = 0;             // never trust flash to terminate
     }
 
     // ---------------------------------------------------------------------
@@ -726,62 +725,88 @@ namespace
     }
 
     // ---------------------------------------------------------------------
-    // §3.7 Named links: channel + group from a micro:bit name.
+    // §3.7 Named links: a micro:bit's name IS its radio address.
     //
-    // A robot derives its link from its own name; `!N <name>` puts the relay on
-    // the same one. The mapping is a contract shared with mbrelay (naming.py)
-    // and the robot's MakeCode extension -- all three carry one vector table.
-    // Every intermediate stays below 2^21 so MakeCode's double arithmetic is
-    // exact without Math.imul; group 10 (the !C/button space) is never produced.
+    // The five-letter CODAL friendly name is NRF_FICR->DEVICEID[1] in base 5,
+    // so a robot derives its own (channel, group) at boot and `!N <name>`
+    // retunes the relay to the same pair. Normative spec: docs/radio-addressing.md
+    // in pxt-nezha-diffdrive; mbrelay's naming.py carries the same steps and
+    // asserts the whole 3125-name space against the published digest.
+    //
+    //   positions 0,2,4  consonant  z v g p t = 0..4
+    //   positions 1,3    vowel      u o i e a = 0..4
+    //   n = base5(name), name[0] most significant            0..3124
+    //   channel = 25 + 2 * (n % 25)                           25..73, odd
+    //   group   = 1 + n / 25; if group >= 10: group += 1      1..9, 11..126
+    //
+    // Never emitted: channels 3, 4, 7 and groups 0, 10 -- group 10 is the
+    // !C/button space, so a hand-dialled relay never lands on a derived link,
+    // and `!C` cannot reach a named board at all: only `!CG` or `!N` can.
     // ---------------------------------------------------------------------
-    constexpr uint32_t kNameHashMod   = 65521;  // largest prime < 2^16
-    constexpr uint32_t kNameChannels  = 84;     // setFrequencyBand 0..83
-    constexpr uint32_t kNameGroups    = 254;    // 0..253 before the reserved-group skip
-    constexpr int      kReservedGroup = 10;
 
-    // Canonical form of a name: trimmed, lower-cased, 1..kNameMax printable
-    // ASCII chars with no whitespace inside. `out` must hold kNameMax + 1.
+    // Digit value of `c` at name position `p`, or -1 if `c` is not in that
+    // position's alphabet.
+    int nameDigit(int p, char c)
+    {
+        const char *alphabet = (p % 2 == 0) ? "zvgpt" : "uoiea";
+        for (int d = 0; d < 5; ++d)
+            if (alphabet[d] == c)
+                return d;
+        return -1;
+    }
+
+    bool isAsciiSpace(char c)
+    {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v';
+    }
+
+    // Canonical form: trim ASCII whitespace, A-Z -> a-z, then exactly
+    // [zvgpt][uoiea][zvgpt][uoiea][zvgpt]. `out` must hold kNameLen + 1.
     // Returns false (and an empty `out`) for anything else.
     bool normalizeName(const char *in, char *out)
     {
         out[0] = 0;
-        while (*in == ' ' || *in == '\t')
+        while (isAsciiSpace(*in))
             ++in;
         int n = 0;
-        for (; *in; ++in)
+        for (; *in && !isAsciiSpace(*in); ++in)
         {
             char c = *in;
-            if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
-                break;                          // trailing whitespace ends it
-            if (c < 0x21 || c > 0x7E || n >= kNameMax)
-            {
-                out[0] = 0;                     // control byte, non-ASCII, or too long
-                return false;
-            }
             if (c >= 'A' && c <= 'Z')
                 c = (char)(c + ('a' - 'A'));
+            if (n >= kNameLen || nameDigit(n, c) < 0)
+            {
+                out[0] = 0;                     // too long, or not that position's letter
+                return false;
+            }
             out[n++] = c;
         }
         for (; *in; ++in)
         {
-            if (*in != ' ' && *in != '\t' && *in != '\r' && *in != '\n')
+            if (!isAsciiSpace(*in))
             {
                 out[0] = 0;                     // "to vez": a space inside
                 return false;
             }
         }
+        if (n != kNameLen)
+        {
+            out[0] = 0;                         // too short
+            return false;
+        }
         out[n] = 0;
-        return n > 0;
+        return true;
     }
 
+    // `name` must already be canonical (normalizeName returned true).
     void nameToRadio(const char *name, int &channel, int &group)
     {
-        uint32_t h = 0;
-        for (const char *p = name; *p; ++p)
-            h = (h * 31 + (uint8_t)*p) % kNameHashMod;
-        channel = (int)(h % kNameChannels);
-        group   = (int)((h / kNameChannels) % kNameGroups);
-        if (group >= kReservedGroup)
+        int n = 0;
+        for (int p = 0; p < kNameLen; ++p)
+            n = n * 5 + nameDigit(p, name[p]);  // 0..3124, name[0] most significant
+        channel = 25 + 2 * (n % 25);
+        group   = 1 + n / 25;
+        if (group >= 10)
             group += 1;
     }
 
@@ -1089,14 +1114,14 @@ namespace
         // Named link (§3.7) --------------------------------------------------
         if (strcmp(line, "!N?") == 0)
         {
-            char out[kNameMax + 8];
+            char out[kNameLen + 8];
             snprintf(out, sizeof(out), "name: %s", cfg.name[0] ? cfg.name : "-");
             comment(out);
             return false;
         }
         if (startsWith(line, "!N "))
         {
-            char name[kNameMax + 1];
+            char name[kNameLen + 1];
             if (normalizeName(line + 3, name))
             {
                 int ch = 0, grp = 0;
