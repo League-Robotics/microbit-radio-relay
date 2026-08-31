@@ -47,7 +47,6 @@ SOFTWARE.
 
 #include "MicroBit.h"
 #include "RadioRelay.h"
-#include "naming.h"   // §3.7 name -> (channel, group); shared with the host conformance dump
 #include "nrf.h"     // NRF_RADIO, RADIO_IRQn, NVIC_* for retuneReceiver()
 #include "Radio.h"   // RADIO_EVT_DATA_READY (radio diagnostics)
 
@@ -153,7 +152,6 @@ namespace
         int  power   = kDefaultPower;
         Mode mode    = MODE_RAW250;  // default 250-byte mode (old MakeCode relays retired)
         bool frag    = false;       // MAKECODE over-length policy: fragment vs truncate
-        char name[naming::kNameLen + 1] = {0};  // §3.7: set by !N; "" once !C/!CG/buttons pick a number
     };
 
     Config cfg;
@@ -177,7 +175,7 @@ namespace
     // ---------------------------------------------------------------------
     const char    kCfgKey[]    = "relaycfg";
     constexpr uint8_t kCfgMagic   = 0x52;   // 'R' validity marker
-    constexpr uint8_t kCfgVersion = 2;      // bump to invalidate an old layout (v2: + name)
+    constexpr uint8_t kCfgVersion = 3;      // bump to invalidate an old layout (v3: name dropped)
 
     struct StoredConfig
     {
@@ -189,7 +187,6 @@ namespace
         uint8_t mode;       // MODE_MAKECODE / MODE_RAW250
         uint8_t frag;
         uint8_t echo;
-        char    name[naming::kNameLen + 1];   // §3.7, NUL-terminated; "" = link not chosen by name
     };
     // The KeyValueStorage value slot is 32 bytes (48-byte block minus 16-byte key).
     static_assert(sizeof(StoredConfig) <= 32, "relaycfg record no longer fits a KeyValuePair");
@@ -208,7 +205,6 @@ namespace
         sc.mode    = (uint8_t)cfg.mode;
         sc.frag    = cfg.frag ? 1 : 0;
         sc.echo    = echoMode ? 1 : 0;
-        memcpy(sc.name, cfg.name, sizeof(sc.name));
 
         KeyValuePair *kv = uBit.storage.get(kCfgKey);
         if (kv != NULL)
@@ -241,8 +237,6 @@ namespace
         cfg.mode  = (sc.mode == MODE_RAW250) ? MODE_RAW250 : MODE_MAKECODE;
         cfg.frag  = sc.frag != 0;
         echoMode  = sc.echo != 0;
-        memcpy(cfg.name, sc.name, sizeof(cfg.name));
-        cfg.name[naming::kNameLen] = 0;             // never trust flash to terminate
     }
 
     // ---------------------------------------------------------------------
@@ -717,15 +711,10 @@ namespace
     {
         cfg.channel = ch;
         cfg.group = 10;
-        cfg.name[0] = 0;                    // a number, not a name (§3.7)
         applyRadioConfig();
         updateDisplay();
         saveConfig();
     }
-
-    // §3.7 Named links: the name -> (channel, group) mapping lives in naming.h,
-    // a pure header the host conformance dump compiles too, so the firmware
-    // and the other implementations are compared on the same code.
 
     // Set the echo transponder explicitly (the !ECHO serial command). The A+B
     // button uses the mode menu below instead.
@@ -848,7 +837,6 @@ namespace
         comment("!C <ch>            set channel 0-35 (group 10)");
         comment("!CG <ch> <group>   set channel 0-83 and group 0-255");
         comment("!RC <ch> <group>   alias of !CG");
-        comment("!N <name>          set channel+group from a micro:bit name");
         comment("!P <0-7>           set transmit power");
         comment("!MODE MAKECODE     32-byte CODAL string framing");
         comment("!MODE RAW250       headerless framing, matching firmware (default)");
@@ -864,20 +852,15 @@ namespace
         comment("buttons A+B        mode menu: 32/250, echo/tx, cancel");
         comment("?                  show channel/group/mode/power");
         comment("!MODE?             show mode");
-        comment("!N?                show the name the link was chosen by");
         comment("HELLO              re-request device banner");
     }
 
     void printConfig()
     {
         char out[80];
-        int n = snprintf(out, sizeof(out), "channel: %d group: %d mode: %s power: %d",
-                         cfg.channel, cfg.group,
-                         cfg.mode == MODE_MAKECODE ? "MAKECODE" : "RAW250", cfg.power);
-        // §3.7: the name goes LAST so every parser anchored on "# channel:" is
-        // unaffected by a link having been chosen by name.
-        if (cfg.name[0] && n > 0 && n < (int)sizeof(out))
-            snprintf(out + n, sizeof(out) - n, " name: %s", cfg.name);
+        snprintf(out, sizeof(out), "channel: %d group: %d mode: %s power: %d",
+                 cfg.channel, cfg.group,
+                 cfg.mode == MODE_MAKECODE ? "MAKECODE" : "RAW250", cfg.power);
         comment(out);
     }
 
@@ -1028,37 +1011,13 @@ namespace
             return false;
         }
 
-        // Named link (§3.7) --------------------------------------------------
-        if (strcmp(line, "!N?") == 0)
-        {
-            char out[naming::kNameLen + 8];
-            snprintf(out, sizeof(out), "name: %s", cfg.name[0] ? cfg.name : "-");
-            comment(out);
-            return false;
-        }
-        if (startsWith(line, "!N "))
-        {
-            char name[naming::kNameLen + 1];
-            if (naming::normalizeName(line + 3, name))
-            {
-                int ch = 0, grp = 0;
-                naming::nameToRadio(name, ch, grp);
-                cfg.channel = ch;
-                cfg.group = grp;
-                memcpy(cfg.name, name, sizeof(cfg.name));
-                applyRadioConfig();
-                saveConfig();
-                uBit.display.printChar('?');        // a custom group, as !CG shows
-                printConfig();
-            }
-            else
-            {
-                comment("error: usage !N <name>");
-            }
-            return false;
-        }
-
         // Channel / group / power -------------------------------------------
+        //
+        // There is deliberately no "tune by name" command (§3.7). A name only
+        // yields a DEFAULT (channel, group); the relay's registry is what says
+        // where a robot actually is, and the firmware cannot see it. A command
+        // that computed the pair on the board would silently mistune exactly
+        // the robots that were moved off their default because of a conflict.
         if (startsWith(line, "!CG ") || startsWith(line, "!RC "))
         {
             int ch = -1, grp = -1;
@@ -1067,7 +1026,6 @@ namespace
             {
                 cfg.channel = ch;
                 cfg.group = grp;
-                cfg.name[0] = 0;                    // a number, not a name (§3.7)
                 applyRadioConfig();
                 saveConfig();
                 uBit.display.printChar('?');        // §3.2: !CG/!RC show '?'

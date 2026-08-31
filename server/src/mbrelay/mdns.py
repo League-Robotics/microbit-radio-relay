@@ -904,8 +904,14 @@ class Advertiser:
         inside avahi's 512-byte legacy-reply cap.
         """
         from . import __version__
-        return ["txtvers=1", f"version={__version__}",
-                f"node={socket.gethostname().split('.')[0]}"]
+        txt = ["txtvers=1", f"version={__version__}",
+               f"node={socket.gethostname().split('.')[0]}"]
+        # Where to ask where a robot is. A client that found this host still
+        # needs the registry, and one short key is well inside the cap.
+        api = getattr(self.daemon, "httpapi", None)
+        if api is not None and api.cfg.enabled:
+            txt.append(f"registry={api.port}")
+        return txt
 
     async def _supervise(self, argv: list[str]) -> None:
         attempt = 0

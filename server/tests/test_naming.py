@@ -14,7 +14,6 @@ from mbrelay import naming
 from mbrelay.naming import (address, decode, encode, name_to_radio, radio_to_name,
                             validate)
 
-from fake_relay import FakeRelayFirmware
 
 SPEC = json.loads(pathlib.Path(__file__).with_name("radio-address-vectors.json").read_text())
 
@@ -25,7 +24,7 @@ def _sha(text: str) -> str:
 
 def test_the_conformance_gate_d2_exercises_the_decoder_the_relay_runs():
     """D2 hashes decode(name) and reverse(channel, group) for every name. It is
-    the gate because decode() is what `!N <name>` executes, and D1 never
+    the gate because decode() is what a registry lookup executes, and D1 never
     calls it: a little-endian decoder passes D1 while being wrong on 96% of
     names. The spec publishes that exact fault's D2 so it is nameable."""
     props = SPEC["properties"]
@@ -129,33 +128,3 @@ def test_every_name_round_trips_through_its_address():
 def test_pairs_outside_the_derived_space_have_no_name(channel, group):
     with pytest.raises(ValueError):
         radio_to_name(channel, group)
-
-
-def test_the_fake_firmware_speaks_the_named_link_grammar():
-    """fake_relay.py is what the server suite runs against, so it must answer
-    `!N` byte-for-byte the way the board does -- name LAST on the config line,
-    so parsers anchored on `# channel:` keep working."""
-    fw = FakeRelayFirmware()
-    fw.feed(b"!N Tovez\n")
-    assert fw.drain() == b"# channel: 55 group: 108 mode: RAW250 power: 7 name: tovez\r\n"
-    fw.feed(b"!N?\n")
-    assert fw.drain() == b"# name: tovez\r\n"
-    fw.feed(b"?\n")
-    assert fw.drain() == b"# channel: 55 group: 108 mode: RAW250 power: 7 name: tovez\r\n"
-
-    fw.feed(b"!C 3\n")                                 # a number forgets the name
-    assert fw.drain() == b"# channel: 3 group: 10 mode: RAW250 power: 7\r\n"
-    fw.feed(b"!N?\n")
-    assert fw.drain() == b"# name: -\r\n"
-
-    for bad in (b"!N to vez\n", b"!N gauti\n", b"!N vevo\n", b"!N \n"):
-        fw.feed(bad)
-        assert fw.drain() == b"# error: usage !N <name>\r\n", bad
-
-
-def test_the_name_survives_a_reset_like_the_rest_of_the_config():
-    fw = FakeRelayFirmware()
-    fw.feed(b"!N vevov\n"); fw.drain()
-    fw.reset(); fw.drain()
-    fw.feed(b"?\n")
-    assert fw.drain() == b"# channel: 37 group: 43 mode: RAW250 power: 7 name: vevov\r\n"

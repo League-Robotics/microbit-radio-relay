@@ -8,12 +8,22 @@ import pytest
 
 from mbrelay.errors import NoFreeDevice
 from mbrelay.inventory import TERMINAL, DeviceState, Inventory
-from mbrelay.naming import name_to_radio
 from mbrelay.relay import RelayControl
 from mbrelay.session import SessionManager
 
 from relay_fixtures import PORT_A, PORT_B, UID_A
 from fake_relay import FakeRelayFirmware, StoredConfig
+
+
+class _FakeRegistry:
+    """Just the reverse lookup a Session needs, so these tests describe the
+    session's behaviour rather than the registry's."""
+
+    def __init__(self, pairs: dict[tuple[int, int], str]) -> None:
+        self.pairs = pairs
+
+    def name_for(self, channel: int, group: int) -> str | None:
+        return self.pairs.get((channel, group))
 
 
 @pytest.fixture
@@ -457,41 +467,51 @@ async def test_the_client_table_is_bounded(manager, cfg):
     assert len(manager._affinity) == 8
 
 
-async def test_a_link_selected_by_name_is_visible(manager):
-    """`!N <name>` picks a channel the client never types, so the status view
-    has to compute it the way the firmware does (naming.py) -- otherwise a
-    collision between a named link and a `!C` one would be invisible."""
+async def test_the_registry_puts_a_robot_name_on_a_link_chosen_by_number(manager):
+    """Every link is now chosen by number -- there is no tune-by-name command --
+    so `mbrelay status` can only name the robot by asking the registry which one
+    lives at that (channel, group). Without this the status view would show a
+    bare 12 and an operator could not tell whose session it is."""
+    manager.registry = _FakeRegistry({(12, 4): "tovez"})
     session = await manager.acquire("test:1")
+    session.name_for = manager.registry.name_for
     session.attach(sink=lambda d: None, on_gone=lambda exc: None)
 
-    session.write_to_board(b"!N Tovez\n")
-    assert session.radio_channel == name_to_radio("tovez")[0] == 55
+    session.write_to_board(b"!CG 12 4\n")
+    assert (session.radio_channel, session.radio_group) == (12, 4)
     assert session.to_json()["name"] == "tovez"
 
-    session.write_to_board(b"!N?\n")                 # a query, not a selection
-    assert (session.radio_channel, session.radio_name) == (55, "tovez")
-
-    session.write_to_board(b"!C 3\n")                # a number forgets the name
-    assert (session.radio_channel, session.radio_name) == (3, None)
+    session.write_to_board(b"!C 3\n")                # !C forces group 10
+    assert (session.radio_channel, session.radio_group) == (3, 10)
+    assert session.radio_name is None                # nothing registered there
 
 
-async def test_a_name_the_board_would_reject_does_not_change_the_view(manager):
+async def test_a_link_the_registry_does_not_know_is_still_tracked(manager):
+    """A registry miss must leave the channel visible for the collision check;
+    only the name is unknown."""
+    session = await manager.acquire("test:1")
+    session.attach(sink=lambda d: None, on_gone=lambda exc: None)
+    session.write_to_board(b"!CG 55 108\n")
+    assert (session.radio_channel, session.radio_group, session.radio_name) == (55, 108, None)
+
+
+async def test_a_malformed_channel_command_does_not_change_the_view(manager):
     session = await manager.acquire("test:1")
     session.attach(sink=lambda d: None, on_gone=lambda exc: None)
     session.write_to_board(b"!C 5\n")
-    session.write_to_board(b"!N \n")
-    session.write_to_board(b"!N " + b"x" * 40 + b"\n")
-    assert (session.radio_channel, session.radio_name) == (5, None)
+    session.write_to_board(b"!CG \n")
+    session.write_to_board(b"!CG notanumber 4\n")
+    assert (session.radio_channel, session.radio_group) == (5, 10)
 
 
-async def test_a_named_link_and_a_numbered_one_on_one_channel_collide(manager, caplog):
+async def test_two_sessions_on_one_channel_collide(manager, caplog):
     a = await manager.acquire("test:1")
     b = await manager.acquire("test:2")
     for s in (a, b):
         s.attach(sink=lambda d: None, on_gone=lambda exc: None)
 
-    a.write_to_board(b"!N tovez\n")                  # channel 55
+    a.write_to_board(b"!CG 55 108\n")
     with caplog.at_level("WARNING"):
-        b.write_to_board(b"!CG 55 10\n")
+        b.write_to_board(b"!CG 55 10\n")             # same air, different group
     assert any("channel_collision" in r.message for r in caplog.records), \
         [r.message for r in caplog.records]

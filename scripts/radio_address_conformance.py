@@ -3,8 +3,8 @@
 
 The spec's digest proves an implementation matches the SPEC. This proves the
 implementations match EACH OTHER -- including the ones that are awkward to run,
-like the relay's C++ firmware and the robot's MakeCode extension -- and when
-they don't, says which name is the first to differ.
+like the robot's MakeCode extension -- and when they don't, says which name is
+the first to differ.
 
 Usage:
     radio_address_conformance.py [--vectors JSON] [--strict] [TARGET ...]
@@ -18,9 +18,9 @@ Usage:
 
 Dump protocol versions are told apart by column count. v2 (5 columns:
 name,channel,group,decode(name),reverse(channel,group)) digests to the spec's
-conformance_sha256 -- D2, the gate, because it hashes the decoder that
-`!N <name>` runs. v1 (3 columns) digests to full_space_sha256 -- D1, forward
-only, kept as a bisector. Dumps of different versions are compared on their
+conformance_sha256 -- D2, the gate, because it hashes the decoder that turns a
+name into its default address. v1 (3 columns) digests to full_space_sha256 --
+D1, forward only, kept as a bisector. Dumps of different versions are compared on their
 first three columns. A v2 dump equal to the spec's published broken-decode
 digest is named as such: that implementation's decoder is little-endian.
     --strict an implementation that reports itself unavailable (no compiler,

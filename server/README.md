@@ -12,6 +12,7 @@ defaults, so nobody inherits the previous user's channel.
 pip install microbit-relayd
 mbrelay serve --port 8760          # on the machine with the boards
 nc some-host 8760                  # from anywhere
+curl some-host:8761/names          # where each robot is (the name registry)
 ```
 
 ## Quick tour
@@ -22,6 +23,9 @@ mbrelay status                     # daemon health and live sessions
 mbrelay discover                   # relay hosts advertising themselves on the LAN
 mbrelay connect                    # a terminal on a relay, host found by itself
 mbrelay connect host:8760          # or name it, which skips discovery entirely
+mbrelay connect tovez              # a terminal on the ROBOT tovez, wherever it is
+mbrelay names                      # the name registry: where each robot is
+mbrelay names set tovez 12/4       # move a robot off its derived channel
 mbrelay flash --all-relays         # reflash every board (needs mbdeploy)
 mbrelay kick s-3                   # boot a session off a board
 mbrelay reset vevov                # force one board back to defaults

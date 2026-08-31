@@ -106,3 +106,42 @@ service = "_mbrelay._tcp"
 # Resolved with which(1), falling back to the other known publishers, so a macOS
 # dev host advertises through dns-sd without any configuration.
 publish_cmd = "avahi-publish"
+
+[registry]
+# The name registry: which (channel, group) each robot is actually on.
+#
+# A micro:bit's name derives a DEFAULT address all by itself -- that is what
+# `mbrelay names` shows as source "derived" -- but the mapping has only 25
+# channels, so 125 names share each one. When two robots collide you move one,
+# and the registry is what records where it went. Asking for a name that has
+# never been seen always answers: the default is computed and recorded.
+#
+# Served over HTTP on its own port, because the callers are usually not on this
+# box (building a robot config, running a channel survey):
+#
+#   curl relay-host:8761/names               # everything on record
+#   curl relay-host:8761/names/tovez         # where tovez is; creates on miss
+#   curl -X PUT relay-host:8761/names/tovez -d '{"channel": 12, "group": 4}'
+#   curl -X DELETE relay-host:8761/names/tovez        # back to derived
+#
+# There is no authentication. This is an internal lab service whose entire
+# content is which radio channel a robot sits on -- which anyone with an
+# antenna can determine anyway. Do not expose the port off your LAN.
+enabled = true
+
+# Empty follows server.bind. Set 127.0.0.1 to keep the registry on-box.
+bind = ""
+port = 8761
+
+# Pinned assignments, as "<channel>/<group>". This is where a channel survey's
+# output belongs: a pin outranks anything set through the API, so a restart
+# cannot quietly reinstate a stale learned value. Changing a pin needs a daemon
+# restart, and `mbrelay names set` refuses to shadow one.
+#
+# Moving a robot is a TWO-SIDED change: the robot derives its own address from
+# its own name at boot, so it has to be reconfigured to match (the deploy-time
+# channel/group constants in pxt-nezha-diffdrive). Pinning here only tells the
+# relay where to tune.
+# [registry.names]
+# tovez = "12/4"
+# vevov = "14/4"

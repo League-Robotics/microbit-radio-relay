@@ -13,6 +13,7 @@ from mbrelay.admin import HANDLERS, AdminServer
 from mbrelay.adminclient import AdminClient
 from mbrelay.errors import AdminError, DaemonNotRunning
 from mbrelay.inventory import DeviceState, Inventory
+from mbrelay.registry import NameRegistry
 from mbrelay.relay import RelayControl
 from mbrelay.session import SessionManager
 from mbrelay.transport import PortInfo
@@ -30,7 +31,9 @@ class StubDaemon:
         self.control = RelayControl(cfg)
         self.inventory = Inventory(cfg, scanner,
                                    prober=lambda r: self.control.probe(factory, r.port))
-        self.sessions = SessionManager(cfg, self.inventory, factory, self.control)
+        self.registry = NameRegistry(cfg)
+        self.sessions = SessionManager(cfg, self.inventory, factory, self.control,
+                                       registry=self.registry)
         self.conns_total = 0
         self.spawned = []
         self._stopping = asyncio.Event()
@@ -72,7 +75,8 @@ async def served(daemon):
 # -- handlers, called directly ---------------------------------------------
 def test_every_documented_command_is_registered():
     for name in ("ping", "version", "status", "list", "sessions", "kick", "rescan",
-                 "disable", "enable", "reset", "config", "loglevel", "shutdown"):
+                 "disable", "enable", "reset", "config", "loglevel", "shutdown",
+                 "names", "names_set", "names_clear"):
         assert name in HANDLERS
 
 
@@ -226,3 +230,40 @@ async def test_an_over_long_socket_path_is_explained(daemon, tmp_path):
         daemon.cfg, admin=dataclasses.replace(daemon.cfg.admin, socket=str(long_path)))
     with pytest.raises(AdminError, match="too long for AF_UNIX"):
         await AdminServer(daemon).start()
+
+
+# -- the name registry over the socket ---------------------------------------
+async def test_names_answers_for_a_robot_nobody_has_asked_about(daemon):
+    """An operator on the box should not have to curl their own daemon, so the
+    registry is reachable here as well as over HTTP."""
+    row = HANDLERS["names"](daemon, {"name": "tovez"})["name"]
+    assert (row["channel"], row["group"], row["source"]) == (55, 108, "derived")
+
+
+async def test_names_set_then_clear_moves_a_robot_and_puts_it_back(daemon):
+    row = HANDLERS["names_set"](daemon, {"name": "tovez", "channel": 12, "group": 4})
+    assert (row["name"]["channel"], row["name"]["source"]) == (12, "registry")
+    assert HANDLERS["names"](daemon, {})["names"][0]["channel"] == 12
+
+    row = HANDLERS["names_clear"](daemon, {"name": "tovez"})
+    assert (row["name"]["channel"], row["name"]["source"]) == (55, "derived")
+
+
+async def test_a_registry_refusal_arrives_as_an_admin_error(daemon):
+    """RegistryError must not escape as a bare exception: the client renders
+    AdminError codes, and an uncaught one becomes a stack trace in the log."""
+    with pytest.raises(AdminError) as caught:
+        HANDLERS["names"](daemon, {"name": "robot1"})
+    assert caught.value.code == "bad_request"
+
+    with pytest.raises(AdminError):
+        HANDLERS["names_set"](daemon, {"name": "tovez", "channel": 999, "group": 4})
+    with pytest.raises(AdminError):
+        HANDLERS["names_set"](daemon, {"name": "tovez"})
+
+
+async def test_names_reports_a_shared_link(daemon):
+    HANDLERS["names_set"](daemon, {"name": "tovez", "channel": 12, "group": 4})
+    HANDLERS["names_set"](daemon, {"name": "vevov", "channel": 12, "group": 4})
+    assert HANDLERS["names"](daemon, {})["conflicts"] == [
+        {"channel": 12, "group": 4, "names": ["tovez", "vevov"]}]

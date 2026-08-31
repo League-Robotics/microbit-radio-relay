@@ -1,6 +1,6 @@
 ---
 title: Relay Server
-blurb: Serve USB-attached relays over TCP, so a radio bridge is a socket away instead of a walk across the room.
+blurb: Serve USB-attached relays over TCP, so a radio bridge is a socket away instead of a walk across the room — and connect to a robot by name.
 order: 40
 slug: relay-server
 tags: [microbit, radio, relay, server, network, tcp]
@@ -56,15 +56,24 @@ the pool.
 ## Connecting
 
 ```bash
-# You do not have to know the address: the servers announce themselves.
+# Name the ROBOT. The server works out where it is and which board to use.
+mbrelay connect tovez
+
+# You do not have to know the address either: the servers announce themselves.
 mbrelay connect
 
 # Or name one. A typed address skips discovery entirely.
 mbrelay connect <host>:<port>
+mbrelay connect tovez@<host>      # a robot, through a named server
 
 # Anything that speaks bytes works, too.
 nc <host> <port>
 ```
+
+`mbrelay connect tovez` is the one to reach for. You name the robot, not a
+channel, a group, a board, a host or a port: the server looks tovez up in its
+**name registry** (below), takes whichever relay is free, tunes it, and drops
+you into the data plane talking to the robot.
 
 From Python, with no dependency on `mbrelay` at all:
 
@@ -199,6 +208,78 @@ On the League fleet the server is installed by Ansible and runs under systemd, s
 `systemctl status mbrelay` and `journalctl -u mbrelay` are the first things to
 try when something looks wrong.
 
+## The name registry — where a robot actually is
+
+A micro:bit's five-letter name derives a `(channel, group)` all by itself (see
+the [Protocol Reference](protocol)), which is how `mbrelay connect tovez` works
+with no configuration at all. But the mapping has 3125 names and only **25 channels**,
+so 125 names share each one — `togov` and `vevov` both derive channel 37. When
+two robots collide you have to move one, and its name then no longer says where
+it is.
+
+So the derived pair is a **default**, and the registry is what records the
+exceptions. Asking it about a name always answers:
+
+```bash
+mbrelay names                          # everything on record
+mbrelay names get tovez                # where tovez is
+mbrelay names set tovez 12/4           # move it
+mbrelay names clear tovez              # back to its derived address
+```
+
+A name nobody has ever asked about is not an error — its default is computed
+and recorded on the spot, so `mbrelay names` really is the list of every robot
+this relay knows about. Only a *malformed* name is refused: `pipip` is a legal
+address nobody happens to be on, while `robot1` has no address at all.
+
+Over HTTP, on `registry.port` (8761 by default), because the people who need
+this are usually not on the relay host — building a robot's config, or running
+a channel survey across the fleet:
+
+```
+GET    /names            every association, and who shares a link
+GET    /names/<name>     where that robot is; creates the record on a miss
+PUT    /names/<name>     {"channel": 12, "group": 4}
+DELETE /names/<name>     back to the derived address
+GET    /status           version and counts
+```
+
+**There is no authentication.** This is an internal lab service whose entire
+content is which radio channel a robot sits on, which anyone with an antenna can
+determine anyway. Do not expose the port beyond your LAN. If a node should keep
+the registry to itself, set `registry.bind = "127.0.0.1"`.
+
+Three layers answer a lookup, highest first:
+
+| source     | where                          | when                          |
+| ---------- | ------------------------------ | ----------------------------- |
+| `config`   | `[registry.names]` in the TOML | pinned; a survey's output     |
+| `registry` | `<state.dir>/names.json`       | set through the API or CLI    |
+| `derived`  | the name itself                | computed, then recorded       |
+
+A config pin outranks anything set through the API — that is the point of it, so
+a restart cannot quietly reinstate a stale learned value — and `mbrelay names
+set` refuses to shadow one rather than pretending to succeed. Changing a pin
+needs a daemon restart.
+
+Two robots may end up on one link. The registry **reports** that rather than
+refusing it: a survey is expected to pass through a clash halfway, and an
+operator moving robots by hand needs to see it rather than be stopped by it.
+
+> **Moving a robot is a two-sided change.** A robot derives its own address from
+> its own name at boot, so it has to be reconfigured to match (the deploy-time
+> channel and group constants in pxt-nezha-diffdrive). The registry only tells
+> the relay where to tune; it cannot move a robot.
+
+The relay firmware knows nothing about any of this — it is told a channel and a
+group with `!CG` and does as it is asked. That is deliberate: a tune-by-name
+command on the board would compute the *derived* pair and so mistune exactly the
+robots that were moved because they had a problem. It also means
+`mbrelay connect <robot>` works against **every** firmware version in the fleet,
+since `!CG` is as old as the protocol. If the registry cannot be reached at all,
+`mbrelay connect` falls back to the derived address and says so on stderr —
+never silently.
+
 ## The radio is shared — check your channel
 
 Four boards means four simultaneous users, and they all transmit into the same
@@ -214,8 +295,14 @@ up in `mbrelay status`, and a collision is logged:
 channel_collision channel=4 sessions=s-2(10.0.0.9:52344), s-5(10.0.0.14:41022)
 ```
 
-If you are driving a robot, agree a channel with whoever else is using the pool,
-and check `mbrelay status` before you start.
+If you are driving a robot, check `mbrelay status` before you start and agree a
+channel with whoever else is using the pool.
+
+Two *robots* can also collide, which is a different problem: 125 names derive
+each channel, so `togov` and `vevov` both land on 37 no matter who is driving
+them. Agreeing anything cannot fix that, because the address comes from the
+name. That is what the name registry is for — move one of them and record where
+it went.
 
 ## If a board stops answering
 

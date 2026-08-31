@@ -134,15 +134,22 @@ def interactive(sock: socket.socket, escape: str = "]", raw: bool = True,
 
 # -- connecting to a robot by name -------------------------------------------
 #
-# `mbrelay connect tovez`: name the ROBOT, not the relay. The client takes a
-# relay from the pool, tunes it to the robot's derived link with `!N <name>`
-# (protocol §3.7), enters the data plane, and hands over a terminal in which
-# every line typed goes to the robot. No channel, no group, no port.
+# `mbrelay connect tovez`: name the ROBOT, not the relay. The client asks the
+# relay host's name registry where that robot is, takes a relay from the pool,
+# tunes it there with `!CG <channel> <group>`, enters the data plane, and hands
+# over a terminal in which every line typed goes to the robot. No channel, no
+# group, no port.
+#
+# The pair always comes from the registry, never from the board. A name only
+# yields a DEFAULT address (§3.7); the registry is what knows whether a robot
+# was moved off it. That is also why this sends `!CG` rather than a tune-by-name
+# command -- and, usefully, `!CG` is as old as the protocol, so this works on
+# every firmware in the fleet.
 
 import re
 from dataclasses import dataclass
 
-from .naming import NAME_RE, normalize
+from .naming import NAME_RE, name_to_radio, normalize, validate
 
 
 class RobotTuneError(Exception):
@@ -184,9 +191,48 @@ def parse_connect_target(target: str | None, default_port: int = DEFAULT_PORT) -
     return ConnectTarget(None, host, port)
 
 
+class RobotResolveError(Exception):
+    """The registry could not say where a robot is."""
+
+
+def resolve_robot(host: str, robot: str, port: int = 8761,
+                  timeout: float = 3.0) -> tuple[int, int, str]:
+    """Ask the relay host's registry where `robot` is: (channel, group, source).
+
+    Falls back to the name's derived address when the registry cannot be
+    reached, because a relay host running an older daemon -- or one whose
+    registry port is firewalled -- should still be usable for every robot that
+    never moved, which today is all of them. The fallback is announced by the
+    caller rather than hidden: on a fleet that HAS moved a robot, silently
+    tuning to the derived pair is the failure mode this whole design exists to
+    prevent, so the user has to be told which answer they got.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    name = validate(robot)          # malformed is an error here, not a fallback
+    url = f"http://{host}:{port}/names/{name}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            data = json.loads(response.read())
+        return int(data["channel"]), int(data["group"]), data.get("source", "registry")
+    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
+        channel, group = name_to_radio(name)
+        raise RegistryUnreachable(channel, group, f"{url}: {exc}") from None
+
+
+class RegistryUnreachable(RobotResolveError):
+    """No registry answered; the derived address is offered instead."""
+
+    def __init__(self, channel: int, group: int, detail: str) -> None:
+        self.channel, self.group, self.detail = channel, group, detail
+        super().__init__(detail)
+
+
 _BANNER_RE = re.compile(rb"DEVICE:\w+:relay:([^:\r\n]+):")
 _REPLY_RE = re.compile(rb"#\s*(?:channel:|error:)[^\r\n]*\r?\n")
-_TUNED_RE = re.compile(rb"#\s*channel:\s*(\d+)\s+group:\s*(\d+).*?\bname:\s*(\S+)")
+_TUNED_RE = re.compile(rb"#\s*channel:\s*(\d+)\s+group:\s*(\d+)")
 _GO_RE = re.compile(rb"#\s*entering data plane[^\r\n]*\r?\n")
 _PONG_RE = re.compile(rb"\bpong\b")
 
@@ -223,9 +269,14 @@ class Tuned:
     answered: bool | None   # did the robot answer PING? None = not probed
 
 
-def tune_to_robot(sock: socket.socket, robot: str, *, timeout: float = 8.0,
-                  settle: float = 0.5, probe: bool = True, out=sys.stderr) -> Tuned:
+def tune_to_robot(sock: socket.socket, robot: str, channel: int, group: int, *,
+                  timeout: float = 8.0, settle: float = 0.5, probe: bool = True,
+                  out=sys.stderr) -> Tuned:
     """Put a freshly acquired relay on `robot`'s link and enter the data plane.
+
+    `channel` and `group` come from the relay host's registry -- resolved by the
+    caller, because only the registry knows whether this robot still sits on the
+    address its name derives.
 
     One line, then its reply, then the next: the firmware can drop bytes of
     the following line while it retunes the radio, so this never bursts.
@@ -234,17 +285,18 @@ def tune_to_robot(sock: socket.socket, robot: str, *, timeout: float = 8.0,
     relay = banner.group(1).decode(errors="replace") if banner else "?"
     time.sleep(settle)
 
-    sock.sendall(f"!N {robot}\n".encode())
+    sock.sendall(f"!CG {channel} {group}\n".encode())
     reply, seen = _read_until(sock, _REPLY_RE, timeout)
     if reply is None:
-        raise RobotTuneError(f"relay {relay} did not answer !N {robot} within {timeout:.0f}s"
-                             + (f": {seen[-120:]!r}" if seen else ""))
+        raise RobotTuneError(
+            f"relay {relay} did not answer !CG {channel} {group} within {timeout:.0f}s"
+            + (f": {seen[-120:]!r}" if seen else ""))
     line = reply.group(0).strip().decode(errors="replace")
     tuned = _TUNED_RE.search(reply.group(0))
     if tuned is None:
-        if "unknown command" in line:
-            raise RobotTuneError(f"relay {relay} runs firmware that predates !N (protocol 3.7); reflash it")
-        raise RobotTuneError(f"relay {relay} refused !N {robot}: {line}")
+        raise RobotTuneError(f"relay {relay} refused !CG {channel} {group}: {line}")
+    # The board echoes what it actually applied; trust that over what we asked
+    # for, so a clamped or rejected value shows up in the message below.
     channel, group = int(tuned.group(1)), int(tuned.group(2))
     out.write(f"mbrelay: relay {relay} tuned to {robot}: channel {channel} group {group}\n")
 

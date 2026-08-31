@@ -66,10 +66,14 @@ this reason.
 
 ### Which board you get
 
-There is no way to request a specific board, but you usually get **the same one
-back**. The pool remembers which boards each client address used recently and
-prefers them, so per-robot work keeps the same hardware and its logs stay
-comparable across sessions.
+You ask for a *robot*, not a board. Any relay in the pool can be tuned to any
+robot's link, so which piece of hardware you get is the server's business —
+`mbrelay connect tovez` looks tovez up in the name registry and tunes whichever
+board it took.
+
+You usually get **the same one back**. The pool remembers which boards each
+client address used recently and prefers them, so per-robot work keeps the same
+hardware and its logs stay comparable across sessions.
 
 It is a preference, not a reservation: if your board is taken you get the
 least-recently-used free one instead, so nothing blocks and wear stays spread
@@ -196,6 +200,78 @@ Discovery is a **convenience and never a prerequisite**. Publishing needs
 one warning at startup and serves boards exactly as before. On macOS the daemon
 uses `dns-sd` instead, so a dev laptop advertises too.
 
+### The name registry — where a robot actually is
+
+A micro:bit's five-letter name derives a `(channel, group)` all by itself
+(Protocol §3.7), which is how `mbrelay connect tovez` can work with no
+configuration at all. But the mapping has 3125 names and only **25 channels**,
+so 125 names share each one — `togov` and `vevov` both derive channel 37. When
+two robots collide you have to move one, and its name then no longer says where
+it is.
+
+So the derived pair is a **default**, and the registry is what records the
+exceptions. Asking it about a name always answers:
+
+```bash
+mbrelay names                          # everything on record
+mbrelay names get tovez                # where tovez is
+mbrelay names set tovez 12/4           # move it
+mbrelay names clear tovez              # back to its derived address
+```
+
+A name nobody has ever asked about is not an error — its default is computed
+and recorded on the spot, so `mbrelay names` really is the list of every robot
+this relay knows about. Only a *malformed* name is refused: `pipip` is a legal
+address nobody happens to be on, while `robot1` has no address at all.
+
+Over HTTP, on `registry.port` (8761 by default), because the people who need
+this are usually not on the relay host — building a robot's config, or running
+a channel survey across the fleet:
+
+```
+GET    /names            every association, and who shares a link
+GET    /names/<name>     where that robot is; creates the record on a miss
+PUT    /names/<name>     {"channel": 12, "group": 4}
+DELETE /names/<name>     back to the derived address
+GET    /status           version and counts
+```
+
+**There is no authentication.** This is an internal lab service whose entire
+content is which radio channel a robot sits on, which anyone with an antenna can
+determine anyway. Do not expose the port beyond your LAN. If a node should keep
+the registry to itself, set `registry.bind = "127.0.0.1"`.
+
+Three layers answer a lookup, highest first:
+
+| source     | where                          | when                          |
+| ---------- | ------------------------------ | ----------------------------- |
+| `config`   | `[registry.names]` in the TOML | pinned; a survey's output     |
+| `registry` | `<state.dir>/names.json`       | set through the API or CLI    |
+| `derived`  | the name itself                | computed, then recorded       |
+
+A config pin outranks anything set through the API — that is the point of it, so
+a restart cannot quietly reinstate a stale learned value — and `mbrelay names
+set` refuses to shadow one rather than pretending to succeed. Changing a pin
+needs a daemon restart.
+
+Two robots may end up on one link. The registry **reports** that rather than
+refusing it: a survey is expected to pass through a clash halfway, and an
+operator moving robots by hand needs to see it rather than be stopped by it.
+
+> **Moving a robot is a two-sided change.** A robot derives its own address from
+> its own name at boot, so it has to be reconfigured to match (the deploy-time
+> channel and group constants in pxt-nezha-diffdrive). The registry only tells
+> the relay where to tune; it cannot move a robot.
+
+The relay firmware knows nothing about any of this — it is told a channel and a
+group with `!CG` and does as it is asked. That is deliberate: a tune-by-name
+command on the board would compute the *derived* pair and so mistune exactly the
+robots that were moved because they had a problem. It also means
+`mbrelay connect <robot>` works against **every** firmware version in the fleet,
+since `!CG` is as old as the protocol. If the registry cannot be reached at all,
+`mbrelay connect` falls back to the derived address and says so on stderr —
+never silently.
+
 ### The radio is shared — check your channel
 
 Four boards means four simultaneous users, and they all transmit into the same
@@ -211,8 +287,14 @@ up in `mbrelay status`, and a collision is logged:
 channel_collision channel=4 sessions=s-2(10.0.0.9:52344), s-5(10.0.0.14:41022)
 ```
 
-If you are driving a robot, agree a channel with whoever else is using the pool,
-and check `mbrelay status` before you start.
+If you are driving a robot, check `mbrelay status` before you start and agree a
+channel with whoever else is using the pool.
+
+Two *robots* can also collide, which is a different problem: 125 names derive
+each channel, so `togov` and `vevov` both land on 37 no matter who is driving
+them. Agreeing anything cannot fix that, because the address comes from the
+name. That is what the name registry is for — move one of them and record where
+it went.
 
 ## 5. Operating it
 
@@ -295,6 +377,10 @@ The knobs worth knowing:
 | `mdns.instance` | the hostname | The name `mbrelay discover` shows. |
 | `mdns.service` | `_mbrelay._tcp` | Only to run two independent fleets on one LAN. |
 | `mdns.publish_cmd` | `avahi-publish` | Falls back to `dns-sd` on macOS. |
+| `registry.enabled` | `true` | `false` turns off the name registry's HTTP port. |
+| `registry.bind` | follows `server.bind` | `127.0.0.1` keeps the registry on-box. |
+| `registry.port` | `8761` | Where `mbrelay connect <robot>` asks where a robot is. |
+| `[registry.names]` | empty | Pinned assignments, `name = "<channel>/<group>"`. |
 | `state.shutdown_grace_s` | `20` | Must stay below the unit's `TimeoutStopSec`. |
 
 ## 8. Reflashing

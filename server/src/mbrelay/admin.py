@@ -22,7 +22,7 @@ import shutil
 from pathlib import Path
 
 from . import __version__
-from .errors import AdminError
+from .errors import AdminError, RegistryError
 from .inventory import DeviceState
 
 log = logging.getLogger(__name__)
@@ -161,6 +161,45 @@ async def _do_reset(daemon, records, force: bool):
             record.state = DeviceState.ERROR
             record.last_error = repr(exc)
             log.error("reset_failed uid=%s err=%r", record.uid, exc)
+
+
+@handler("names")
+def _names(daemon, args):
+    """The registry, over the local socket as well as over HTTP -- an operator
+    on the box should not have to curl their own daemon."""
+    if name := args.get("name"):
+        try:
+            return {"name": daemon.registry.resolve(name).to_json()}
+        except RegistryError as exc:
+            raise AdminError(str(exc), code=exc.code) from None
+    return daemon.registry.listing()
+
+
+@handler("names_set")
+def _names_set(daemon, args):
+    name = args.get("name")
+    if not name:
+        raise AdminError("names set needs a name", code="bad_request")
+    try:
+        channel, group = int(args["channel"]), int(args["group"])
+    except (KeyError, TypeError, ValueError):
+        raise AdminError("names set needs a channel and a group",
+                         code="bad_request") from None
+    try:
+        return {"name": daemon.registry.set(name, channel, group).to_json()}
+    except RegistryError as exc:
+        raise AdminError(str(exc), code=exc.code) from None
+
+
+@handler("names_clear")
+def _names_clear(daemon, args):
+    name = args.get("name")
+    if not name:
+        raise AdminError("names clear needs a name", code="bad_request")
+    try:
+        return {"name": daemon.registry.clear(name).to_json()}
+    except RegistryError as exc:
+        raise AdminError(str(exc), code=exc.code) from None
 
 
 @handler("config")

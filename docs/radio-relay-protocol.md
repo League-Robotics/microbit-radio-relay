@@ -132,7 +132,6 @@ sending is done in the data plane after `!GO`, with no prefix.
 | `!C <ch>`          | Set channel (0–35), forces group 10. Display shows the channel glyph. |
 | `!CG <ch> <group>` | Set channel (0–83) and group (0–255). Display shows `?`.            |
 | `!RC <ch> <group>` | Alias of `!CG`.                                                     |
-| `!N <name>`        | Set channel and group from a micro:bit name (§3.7). Display shows `?`. |
 | `!P <0-7>`         | Set transmit power.                                                 |
 | `!MODE MAKECODE`   | Select 32-byte CODAL framing.                                       |
 | `!MODE RAW250`     | Select headerless ≤250-byte framing (default). `RAW251` accepted as alias. |
@@ -143,7 +142,7 @@ sending is done in the data plane after `!GO`, with no prefix.
 | `!HELP`            | Print protocol summary.                                            |
 | `HELLO`            | Re-request the device announcement banner.                         |
 
-Config changes (`!C`, `!CG`/`!RC`, `!N`, `!P`, `!MODE`, `!FRAG`, `!ECHO`) are applied
+Config changes (`!C`, `!CG`/`!RC`, `!P`, `!MODE`, `!FRAG`, `!ECHO`) are applied
 immediately, persisted to flash (§2.1), and echoed back as a `#` comment.
 
 **Debug commands** (compiled in by default; the whole facility is stripped when
@@ -164,7 +163,6 @@ lines is unaffected when debug is on.
 | --------- | ------------------------------------------------------- |
 | `?`       | `# channel: <ch> group: <g> mode: <m> power: <p>`       |
 | `!MODE?`  | `# mode: MAKECODE` or `# mode: RAW250`                  |
-| `!N?`     | `# name: <name>`, or `# name: -` if the link was not chosen by name (§3.7) |
 | `!DEBUG?` | `# debug: ON` or `# debug: OFF` (debug build only)      |
 
 Query support matters because the host cannot otherwise see relay state. Even
@@ -233,43 +231,48 @@ The 5×5 display reflects state:
   to the resting display. This reflects the persisted config restored at boot.
 - **Entering the data plane:** a single `.`.
 
-### 3.7 Named links
+### 3.7 Names and radio addresses
 
-A micro:bit's five-letter name **is** its radio address: the CODAL friendly
-name is `NRF_FICR->DEVICEID[1]` written in base 5, so a robot derives its own
-`(channel, group)` at boot, and anyone who knows the name derives the same pair
-— no registry, no allocation. `!N <name>` retunes the relay to that pair:
+A micro:bit's five-letter name **derives** a radio address: the CODAL friendly
+name is `NRF_FICR->DEVICEID[1]` written in base 5, so a robot computes its own
+`(channel, group)` at boot and anyone who knows the name computes the same pair
+with no coordination at all.
+
+That pair is a **default, not an address**. The mapping has 3125 names but only
+25 channels, so 125 names share each one — `togov` and `vevov` both derive
+channel 37. When two robots collide you have to move one, and then its name no
+longer says where it is. **Where a robot actually sits is the relay server's
+name registry**, described in [the server doc](relay-server.md); this firmware
+knows nothing about it.
+
+**There is deliberately no tune-by-name command.** An earlier version of this
+protocol had `!N <name>`, and it was removed: the board cannot see the registry,
+so `!N` would compute the derived pair and silently mistune exactly the robots
+that were moved off it — the ones with a known problem. Every link is now chosen
+by number, with `!CG <ch> <group>`:
 
 ```
-!N tovez
-# channel: 55 group: 108 mode: RAW250 power: 7 name: tovez
+!CG 55 108
+# channel: 55 group: 108 mode: RAW250 power: 7
 ```
 
-The name is trimmed and lower-cased (`TOVEZ`, ` tovez ` and `tovez` are one
-board) and must match exactly `[zvgpt][uoiea][zvgpt][uoiea][zvgpt]`; anything
-else is answered with `# error: usage !N <name>`. The link is applied and
-persisted exactly like `!CG`, and the name is persisted with it, so `?` keeps
-reporting `name: <name>` after a reset and `!N?` answers `# name: tovez`. `!C`,
-`!CG`/`!RC` and the A/B buttons choose a link by *number* and therefore forget
-the name (`!N?` then answers `# name: -`).
-
-`name:` is always the **last** field of the config line, so a parser anchored on
-`# channel:` — every existing one — is unaffected.
-
-You rarely type any of this yourself: `mbrelay connect tovez` takes a relay from
-the pool, sends `!N tovez`, enters the data plane and hands you a terminal on
-the robot — no channel, group, host or port.
+You rarely type that yourself. `mbrelay connect tovez` asks the relay host's
+registry where `tovez` is, takes a relay from the pool, sends the `!CG`, enters
+the data plane and hands you a terminal on the robot — no channel, group, host
+or port. Because `!CG` is as old as this protocol, that works against **every**
+firmware version in the fleet.
 
 **The mapping** is owned by pxt-nezha-diffdrive (`docs/radio-addressing.md`,
-normative, with the machine-readable `docs/radio-address-vectors.json`). This
-firmware (`nameToRadio` in [`RadioRelay.cpp`](../source/relay/RadioRelay.cpp)) and the server ([`naming.py`](../server/src/mbrelay/naming.py)) implement the same
-steps; the server's tests mirror the vectors file and check the **entire
-3125-name space** against its published sha256 rather than a sampled table.
-`just conformance` goes one step further: it runs every implementation — this
-firmware's mapping compiled for the host, the server's Python, and any sibling
-repository exposing a `tools/radio-address-dump` — and reports the first name on
-which any two disagree, so the three repos are checked against *each other*,
-not only against the spec.
+normative, with the machine-readable `docs/radio-address-vectors.json`). The
+server ([`naming.py`](../server/src/mbrelay/naming.py)) implements it to compute
+a name's default; the robot's own firmware implements it to self-address at
+boot. The server's tests mirror the vectors file and check the **entire
+3125-name space** against its published sha256 rather than a sampled table, and
+`just conformance` runs every implementation it can find — the server's Python
+and any sibling repository exposing a `tools/radio-address-dump` — reporting the
+first name on which any two disagree, so the repos are checked against *each
+other*, not only against the spec. This firmware no longer implements the
+mapping and no longer takes part.
 
 ```
 positions 0, 2, 4   consonant   z v g p t   = 0 1 2 3 4
@@ -286,8 +289,13 @@ distinct pairs, 125 names per channel, 25 per group. It **never emits channels
 3, 4 or 7, nor groups 0 or 10** — channels 3/4 with group 10 are the legacy
 hand-allocated fleet, band 7 with group 0 is MakeCode's unconfigured default,
 and group 10 is this relay's `!C`/button space (§3.5). So a hand-dialled `!C`
-can never land on a derived link, `?` on the display always means a custom or
-named link — and `!C` cannot reach a named board at all; only `!CG` or `!N` can.
+can never land on a derived link, and `?` on the display always means a custom
+one. `!C` cannot reach a derived link at all; only `!CG` can.
+
+Note that a registry override is free of those guarantees — it can put a robot
+anywhere `!CG` accepts, including group 10. That is the point: the reserved
+values protect the *derived* space, and an override exists precisely because the
+derived space ran out of room.
 
 | name    | n    | channel | group | board                           |
 | ------- | ---- | ------- | ----- | ------------------------------- |
@@ -298,6 +306,9 @@ named link — and `!C` cannot reach a named board at all; only `!CG` or `!N` ca
 | `getez` | 1740 | 55      | 71    | relay                           |
 | `zavaz` | 545  | 65      | 23    | relay                           |
 | `tovez` | 2665 | 55      | 108   | robot                           |
+
+Those are the **defaults**; `mbrelay names` on the relay host is what says where
+each of them is today.
 
 A relay has no address of its own — it adopts the robot's, so `getez` serving
 `tovez` tunes to 55/108 and its own pair never goes on air. Two *robots* on one
@@ -467,7 +478,12 @@ standalone-peer echo/MAKECODE tests are the other `scripts/*_test.py` files.
    (RAW250); both ends must match.
 8. **Reliability** — fire-and-forget today; the `ACK_REQ`/`ACK` responder is
    wired, the stop-and-wait sender is the next step. (§5.3)
-9. **Named links** — *Implemented:* `!N <name>` / `!N?`, name persisted with the
-   config (record v2). The mapping is pxt-nezha-diffdrive's normative
-   radio-addressing spec; the server tests assert the whole name space
-   against its published digest. (§3.7)
+9. **Names and radio addresses** — *Resolved:* a name derives a **default**
+   address, and the relay server's name registry says where a robot actually
+   is. The firmware's `!N <name>` / `!N?` were REMOVED with the flash record's
+   name field (record v3): the board cannot see the registry, so tuning by name
+   on the board would mistune exactly the robots that were moved off their
+   default. Every link is chosen by number. The mapping is still
+   pxt-nezha-diffdrive's normative radio-addressing spec, implemented by the
+   server, whose tests assert the whole name space against its published
+   digest. (§3.7)

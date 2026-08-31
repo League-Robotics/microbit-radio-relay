@@ -1,16 +1,27 @@
-"""A micro:bit's name IS its radio address.
+"""A micro:bit's name gives its DEFAULT radio address.
 
 The five-letter CODAL friendly name is a base-5 encoding of the chip's
 ``NRF_FICR->DEVICEID[1]``, so a board derives its own ``(channel, group)`` at
-boot, and any tool that knows the name derives the same pair -- no registry, no
-allocation. ``!N <name>`` retunes the relay to that pair.
+boot and any tool that knows the name derives the same pair, with no
+coordination at all.
+
+That is a default, not an address. 3125 names share 25 channels, so 125 names
+land on each one; when two robots collide, one has to move, and its name then
+no longer says where it is. ``registry.py`` is what records the exceptions, and
+this module is what it calls to compute the default in the first place. Nothing
+here knows about overrides -- keeping the mapping pure is what lets its digest
+stay a cross-repo contract.
 
 Normative spec: ``docs/radio-addressing.md`` in pxt-nezha-diffdrive, with the
 machine-readable contract ``docs/radio-address-vectors.json``. This repo mirrors
 that file at ``server/tests/radio-address-vectors.json`` and asserts the whole
-3125-name space against its published sha256 -- never a copied table. The
-firmware (``nameToRadio`` in ``source/relay/RadioRelay.cpp``) carries the same
-steps.
+3125-name space against its published sha256 -- never a copied table.
+
+The relay firmware does NOT implement the mapping. It used to, for a ``!N
+<name>`` command that was removed along with it: the board cannot see the
+registry, so tuning by name on the board would mistune exactly the robots that
+were moved off their default. The robot's own firmware still implements it, to
+self-address at boot.
 
 The map, verbatim from the spec::
 
@@ -24,7 +35,8 @@ The map, verbatim from the spec::
 Every intermediate is 0..3124, so MakeCode int32, C++ ``int`` and Python agree.
 Never emitted: channels 3, 4, 7 (the legacy fleet and MakeCode's default) and
 groups 0, 10 -- group 10 is the relay's ``!C``/button space, so a hand-dialled
-relay can never land on a derived link.
+relay can never land on a derived link. A registry override is under no such
+constraint: it may use anything ``!CG`` accepts.
 """
 
 from __future__ import annotations
@@ -59,7 +71,8 @@ def validate(name: str) -> str:
     """Normalize, then require a well-formed micro:bit name.
 
     Raises ``ValueError`` for anything the firmware answers with
-    ``# error: usage !N <name>``.
+    ``not a micro:bit name``. Unknown is fine, malformed is not: ``pipip`` is a
+    legal address nobody is on, while ``robot1`` has none at all.
     """
     n = normalize(name)
     if not NAME_RE.match(n):
@@ -97,7 +110,8 @@ def address(n: int) -> tuple[int, int]:
 
 
 def name_to_radio(name: str) -> tuple[int, int]:
-    """``(channel, group)`` for a name -- what ``!N <name>`` tunes the relay to."""
+    """The ``(channel, group)`` a name derives -- its default, and what the
+    registry records for a name it has not seen before."""
     return address(decode(name))
 
 
@@ -119,7 +133,7 @@ def canonical_form(version: int = 2) -> str:
     version 2 (the conformance gate, ``$.properties.conformance_sha256``):
     ``<name>,<channel>,<group>,<decode(name)>,<reverse(channel,group)>`` --
     the last two columns are always n, which is the point: every line forces
-    the decoder (what ``!N <name>`` actually runs) and the reverse map to
+    the decoder (what a registry lookup actually runs) and the reverse map to
     execute and hashes their output. A little-endian decoder is wrong on 96%
     of names and passes version 1 unchanged; against version 2 it yields the
     spec's published broken-decode digest and fails loudly.

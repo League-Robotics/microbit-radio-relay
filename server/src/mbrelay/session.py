@@ -28,7 +28,6 @@ from .errors import AcquireFailed, NoFreeDevice
 from .inventory import DeviceRecord, DeviceState, Inventory
 from .logs import session_logger
 from .relay import Reader, RelayControl
-from .naming import name_to_radio, validate
 from .transport import ByteChannel
 
 log = logging.getLogger(__name__)
@@ -45,11 +44,11 @@ _DATA_PLANE_MARK = b"# entering data plane"
 # purpose), but it can at least SEE it: the channel shows up in `mbrelay status`
 # and a collision is logged.
 #
-# `!N <name>` selects a link by robot name; the client never sees a number, so
-# the daemon computes the channel with the same mapping the firmware uses
-# (naming.py) to keep the status view honest. `!N?` is a query and must not
-# match: it has no whitespace after the N.
-_CHANNEL_RE = re.compile(rb"^!(?:(?:C|CG|RC)\s+(\d+)|N[ \t]+([^\r\n]+))", re.MULTILINE)
+# Every link is chosen by NUMBER -- there is no tune-by-name command, because a
+# name only gives a default and the registry is what says where a robot really
+# is. So the group is captured too: `registry.name_for(channel, group)` is the
+# only way back to a robot name, and it needs the whole pair.
+_CHANNEL_RE = re.compile(rb"^!(?:CG|RC)\s+(\d+)\s+(\d+)|^!C\s+(\d+)", re.MULTILINE)
 
 
 class Session:
@@ -70,7 +69,11 @@ class Session:
         self.last_activity = self.started
         self.plane = "command"
         self.radio_channel: int | None = None   # last channel this client selected
-        self.radio_name: str | None = None      # ...and the name it was chosen by, if any
+        self.radio_group: int | None = None     # ...and its group; !C forces 10
+        self.radio_name: str | None = None      # the robot the registry says is there
+        # Reverse lookup (channel, group) -> robot name, injected by the manager
+        # so a Session stays constructible without a registry (the tests do).
+        self.name_for: Callable[[int, int], str | None] = lambda c, g: None
         self._cmd_tail = b""
         # Serial reads land on arbitrary chunk boundaries, so the marker below
         # can straddle two of them. Keep the tail of the previous chunk and
@@ -148,20 +151,17 @@ class Session:
         if len(self._cmd_tail) > 256:          # not a line; stop accumulating
             self._cmd_tail = b""
         for match in _CHANNEL_RE.finditer(lines):
-            if match.group(2) is not None:              # !N <name>
-                try:
-                    name = validate(match.group(2).decode("ascii"))
-                except (UnicodeDecodeError, ValueError):
-                    continue                            # the board rejects it too
-                channel = name_to_radio(name)[0]
-            else:                                       # !C / !CG / !RC <ch> ...
-                try:
-                    channel = int(match.group(1))
-                except ValueError:
-                    continue
-                name = None
-            if channel != self.radio_channel or name != self.radio_name:
-                self.radio_channel, self.radio_name = channel, name
+            if match.group(3) is not None:              # !C <ch> -- forces group 10
+                channel, group = int(match.group(3)), 10
+            else:                                       # !CG / !RC <ch> <group>
+                channel, group = int(match.group(1)), int(match.group(2))
+            # Which robot that is, if the registry knows. `mbrelay connect
+            # <robot>` tunes by number, so without this the status view could
+            # only ever show a bare channel.
+            name = self.name_for(channel, group)
+            if (channel, group, name) != (self.radio_channel, self.radio_group,
+                                          self.radio_name):
+                self.radio_channel, self.radio_group, self.radio_name = channel, group, name
                 self._on_channel(self)
 
     def to_json(self) -> dict:
@@ -169,7 +169,8 @@ class Session:
             "id": self.id, "uid": self.record.uid, "device_name": self.record.name,
             "port": self.record.port, "peer": self.peer,
             "started": round(self.started, 3), "age_s": round(self.age, 1),
-            "plane": self.plane, "channel": self.radio_channel, "name": self.radio_name,
+            "plane": self.plane, "channel": self.radio_channel,
+            "group": self.radio_group, "name": self.radio_name,
             "rx_bytes": self.rx_bytes, "tx_bytes": self.tx_bytes,
             "idle_s": round(self.idle, 1),
         }
@@ -178,11 +179,13 @@ class Session:
 class SessionManager:
     """Allocates boards to clients and cleans up after them."""
 
-    def __init__(self, cfg, inventory: Inventory, factory, control: RelayControl) -> None:
+    def __init__(self, cfg, inventory: Inventory, factory, control: RelayControl,
+                 registry=None) -> None:
         self.cfg = cfg
         self.inventory = inventory
         self.factory = factory
         self.control = control
+        self.registry = registry        # NameRegistry, or None in unit tests
         self.sessions: dict[str, Session] = {}
         self.rejected_total = 0
         self.accepted_total = 0
@@ -303,6 +306,8 @@ class SessionManager:
         preamble = b"" if self.cfg.server.preamble == "none" else info.raw + b"\r\n"
         session = Session(record, channel, reader, peer, preamble)
         session._on_channel = self._channel_selected
+        if self.registry is not None:
+            session.name_for = self.registry.name_for
         if self.cfg.server.announce_session:
             session.preamble = f"# session {session.id}\r\n".encode() + session.preamble
         record.state = DeviceState.BUSY

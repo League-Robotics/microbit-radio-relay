@@ -46,13 +46,20 @@ DEVICE:RADIOBRIDGE:relay:<deviceName>:<serialNumber>
 ## 3. Command quick-start
 
 Everything below is the **command plane** — line-oriented, `\n`-terminated, valid
-only before `!GO`:
+only before `!GO`.
+
+> If you are driving a robot rather than exploring the firmware, you do not need
+> any of this: `mbrelay connect tovez` picks a relay, tunes it to wherever the
+> [Relay Server](relay-server)'s name registry says that robot is, and hands you
+> a terminal on it.
 
 ```text
 HELLO            # re-request the banner if you missed it
 ?                # read back: # channel: <ch> group: <g> mode: <m> power: <p>
 !C 5             # channel 5 (forces group 10)
-!N tovez         # ...or the link the robot named tovez uses (see Protocol §3.7)
+!CG 55 108       # ...or an explicit channel and group. A robot's name only
+                 # gives a DEFAULT address -- ask the relay server's registry
+                 # (`mbrelay names`) where it actually is.
 !MODE RAW250     # (default) headerless ≤250-byte framing
 !ECHO ON         # optional: make this board a transponder
 !GO              # enter the transparent data plane
@@ -73,7 +80,6 @@ Common commands (full table in the [Protocol Reference](protocol)):
 | ------------------ | ----------------------------------------------------------------- |
 | `!C <ch>`          | channel 0–35, forces group 10                                     |
 | `!CG <ch> <group>` | channel 0–83 and group 0–255 (`!RC` is an alias)                  |
-| `!N <name>`        | the link the robot named `<name>` uses — channel+group from its name |
 | `!P <0-7>`         | transmit power                                                    |
 | `!MODE RAW250`     | headerless ≤250-byte framing (default)                            |
 | `!MODE MAKECODE`   | 32-byte CODAL packets for a stock MakeCode robot                  |

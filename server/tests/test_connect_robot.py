@@ -1,10 +1,11 @@
 """`mbrelay connect tovez` -- name the robot, not the relay.
 
-The client takes a relay from the pool, tunes it with `!N <name>`, enters the
-data plane and hands over a terminal. Tuning is driven here against the fake
-firmware over a real socket pair; the CLI routing tests never touch the
-network (every address is in the RFC 5737 documentation range and connect()
-is replaced, exactly as test_cli.py does).
+The client asks the registry where the robot is, takes a relay from the pool,
+tunes it there with `!CG <channel> <group>`, enters the data plane and hands
+over a terminal. Tuning is driven here against the fake firmware over a real
+socket pair; the CLI routing tests never touch the network (every address is
+in the RFC 5737 documentation range and connect() is replaced, exactly as
+test_cli.py does).
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ def test_a_robot_that_is_not_a_micro_bit_name_is_refused_before_dialling(bad):
 
 # -- tuning, against the fake firmware over a socket -------------------------
 def _serve(fw: FakeRelayFirmware, peer: socket.socket, *, pong: bool = True,
-           reply_to_n: bytes | None = None) -> threading.Thread:
+           reply_to_cg: bytes | None = None) -> threading.Thread:
     """Play daemon + board: banner first, then answer whatever arrives."""
     fw.reset()
 
@@ -60,8 +61,8 @@ def _serve(fw: FakeRelayFirmware, peer: socket.socket, *, pong: bool = True,
                 return
             if not data:
                 return
-            if reply_to_n is not None and data.startswith(b"!N "):
-                peer.sendall(reply_to_n)
+            if reply_to_cg is not None and data.startswith(b"!CG "):
+                peer.sendall(reply_to_cg)
                 continue
             was_command = fw.plane == "command"
             fw.feed(data)
@@ -89,10 +90,10 @@ def test_tuning_puts_the_relay_on_the_robots_link_and_enters_the_data_plane(link
     _serve(fw, board)
     log = io.StringIO()
 
-    tuned = tune_to_robot(client, "tovez", settle=0.01, out=log)
+    tuned = tune_to_robot(client, "tovez", 55, 108, settle=0.01, out=log)
 
     assert (tuned.relay, tuned.channel, tuned.group) == ("getez", 55, 108)
-    assert fw.cfg.name == "tovez" and fw.plane == "data"
+    assert (fw.cfg.channel, fw.cfg.group) == (55, 108) and fw.plane == "data"
     assert tuned.answered is True
     assert "relay getez tuned to tovez: channel 55 group 108" in log.getvalue()
     assert "tovez answered PING" in log.getvalue()
@@ -104,21 +105,27 @@ def test_a_silent_robot_is_reported_but_the_terminal_is_still_handed_over(link):
     client, board = link
     _serve(FakeRelayFirmware(), board, pong=False)
     log = io.StringIO()
-    tuned = tune_to_robot(client, "vevov", settle=0.01, out=log)
+    tuned = tune_to_robot(client, "vevov", 37, 43, settle=0.01, out=log)
     assert (tuned.channel, tuned.group, tuned.answered) == (37, 43, False)
     assert "no answer from vevov on channel 37 group 43" in log.getvalue()
 
 
-def test_a_relay_that_predates_named_links_is_named_as_the_problem(link):
-    client, board = link
-    _serve(FakeRelayFirmware(), board,
-           reply_to_n=b"# error: unknown command (try !HELP)\r\n")
-    with pytest.raises(RobotTuneError, match="predates !N"):
-        tune_to_robot(client, "tovez", settle=0.01, out=io.StringIO())
-
-
 def test_the_relays_own_refusal_is_passed_through(link):
+    """A pair the firmware will not take (channel > 83) comes back as the
+    board's own error line, not as a timeout."""
     client, board = link
     _serve(FakeRelayFirmware(), board)
-    with pytest.raises(RobotTuneError, match="refused !N gauti"):
-        tune_to_robot(client, "gauti", settle=0.01, out=io.StringIO())
+    with pytest.raises(RobotTuneError, match=r"refused !CG 200 4"):
+        tune_to_robot(client, "tovez", 200, 4, settle=0.01, out=io.StringIO())
+
+
+def test_the_pair_the_board_applied_wins_over_the_one_we_asked_for(link):
+    """The board echoes its real config; reporting what we requested instead
+    would hide a firmware that clamped or ignored the value."""
+    client, board = link
+    _serve(FakeRelayFirmware(), board,
+           reply_to_cg=b"# channel: 9 group: 9 mode: RAW250 power: 7\r\n"
+                       b"# entering data plane\r\n")
+    tuned = tune_to_robot(client, "tovez", 55, 108, settle=0.01, probe=False,
+                          out=io.StringIO())
+    assert (tuned.channel, tuned.group) == (9, 9)

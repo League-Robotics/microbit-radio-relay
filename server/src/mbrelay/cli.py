@@ -18,7 +18,7 @@ from .adminclient import AdminClient
 from .config import load as load_config
 from .errors import (EXIT_ERROR, EXIT_HARDWARE, EXIT_NO_DAEMON, EXIT_NO_DEVICE,
                      EXIT_OK, EXIT_USAGE, AdminError, ConfigError, DaemonNotRunning,
-                     MbrelayError)
+                     MbrelayError, RegistryError)
 
 
 # ---------------------------------------------------------------------------
@@ -135,8 +135,9 @@ def build_parser() -> argparse.ArgumentParser:
     # distinguishable from "typed 127.0.0.1:8760", or discovery can never run.
     c.add_argument("target", nargs="?", default=None,
                    help="HOST[:PORT]; or a ROBOT name such as tovez, or ROBOT@HOST, "
-                        "to be tuned to that robot with !N and dropped into the data "
-                        "plane; omit it to find a relay host on the LAN")
+                        "to be looked up in that host's registry, tuned to, and "
+                        "dropped into the data plane; omit it to find a relay "
+                        "host on the LAN")
     c.add_argument("--no-probe", action="store_true",
                    help="after tuning to a robot, do not PING it")
     c.add_argument("--send", action="append", default=[], metavar="LINE")
@@ -154,6 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="never browse; fall straight back to 127.0.0.1:8760")
     c.add_argument("--discover-timeout", type=float, default=1.5, metavar="SECONDS")
     c.set_defaults(func=cmd_connect)
+
+    n = sub.add_parser("names", help="the name registry: where each robot is")
+    n.add_argument("action", nargs="?", default="list",
+                   choices=["list", "get", "set", "clear"])
+    n.add_argument("name", nargs="?", help="a micro:bit name, e.g. tovez")
+    n.add_argument("pair", nargs="?", metavar="CHANNEL/GROUP",
+                   help="for 'set': the link to put that robot on, e.g. 12/4")
+    n.set_defaults(func=cmd_names)
 
     cf = sub.add_parser("config", help="inspect the merged configuration")
     cf.add_argument("action", nargs="?", default="show", choices=["show"])
@@ -618,8 +627,9 @@ def _pick_host(hosts):
 
 
 def cmd_connect(args) -> int:
-    from .client import (RobotTuneError, connect, interactive, parse_connect_target,
-                         parse_target, run_script, tune_to_robot)
+    from .client import (RegistryUnreachable, RobotTuneError, connect, interactive,
+                         parse_connect_target, parse_target, resolve_robot,
+                         run_script, tune_to_robot)
 
     try:
         want = parse_connect_target(args.target)
@@ -639,14 +649,38 @@ def cmd_connect(args) -> int:
         target = resolved
 
     host, port = parse_target(target or configured or DEFAULT_TARGET)
+
+    # Look the robot up BEFORE taking a board out of the pool: boards are
+    # scarce, and occupying one only to discover the registry has nothing
+    # usable would deny it to somebody else for the length of a release cycle.
+    #
+    # Where the robot is comes from the relay host's registry, never from the
+    # name alone -- the name only gives a default, and the registry is what
+    # knows whether this robot was moved off it.
+    link = None
+    if want.robot:
+        try:
+            channel, group, source = resolve_robot(host, want.robot,
+                                                   port=cfg.registry.port)
+        except RegistryUnreachable as exc:
+            channel, group = exc.channel, exc.group
+            print(f"mbrelay: no registry on {host}:{cfg.registry.port} "
+                  f"({exc.detail}); using {want.robot}'s derived address "
+                  f"{channel}/{group}", file=sys.stderr)
+        else:
+            if source != "derived":
+                print(f"mbrelay: registry puts {want.robot} on "
+                      f"{channel}/{group} ({source})", file=sys.stderr)
+        link = (channel, group)
+
     try:
         sock = connect(host, port)
     except OSError as exc:
         print(f"mbrelay: cannot connect to {host}:{port}: {exc}", file=sys.stderr)
         return EXIT_ERROR
-    if want.robot:
+    if link is not None:
         try:
-            tune_to_robot(sock, want.robot, probe=not args.no_probe)
+            tune_to_robot(sock, want.robot, *link, probe=not args.no_probe)
         except RobotTuneError as exc:
             sock.close()
             print(f"mbrelay: {exc}", file=sys.stderr)
@@ -657,6 +691,58 @@ def cmd_connect(args) -> int:
         finally:
             sock.close()
     return interactive(sock, escape=args.escape, raw=args.raw, log_path=args.log)
+
+
+def cmd_names(args) -> int:
+    """`mbrelay names` -- the same registry the HTTP API serves, for an
+    operator who is already on the box."""
+    from .registry import parse_pair
+
+    if args.action in ("get", "set", "clear") and not args.name:
+        print(f"mbrelay: names {args.action} needs a name", file=sys.stderr)
+        return EXIT_USAGE
+
+    if args.action == "set":
+        if not args.pair:
+            print("mbrelay: names set needs a link, e.g. "
+                  f"'mbrelay names set {args.name} 12/4'", file=sys.stderr)
+            return EXIT_USAGE
+        try:
+            channel, group = parse_pair(args.pair, where="names set")
+        except RegistryError as exc:
+            print(f"mbrelay: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+        return _simple(args, "names_set", lambda r: _one_name(r["name"]),
+                       name=args.name, channel=channel, group=group)
+
+    if args.action == "clear":
+        return _simple(args, "names_clear", lambda r: _one_name(r["name"]),
+                       name=args.name)
+
+    if args.action == "get" or args.name:
+        return _simple(args, "names", lambda r: _one_name(r["name"]), name=args.name)
+
+    return _simple(args, "names", _name_table)
+
+
+def _one_name(row: dict) -> str:
+    line = f"{row['name']}  channel {row['channel']}  group {row['group']}  ({row['source']})"
+    return line if row["derived"] else line + "  -- moved off its derived address"
+
+
+def _name_table(result: dict) -> str:
+    rows = result["names"]
+    if not rows:
+        return ("no names on record yet -- one appears the first time anything "
+                "asks where a robot is")
+    table = _table([[r["name"], r["channel"], r["group"], r["source"],
+                     ", ".join(r.get("conflict", [])) or "-"] for r in rows],
+                   ["NAME", "CHANNEL", "GROUP", "SOURCE", "SHARES LINK WITH"])
+    if result.get("conflicts"):
+        table += ("\n\nnote: the links marked above are held by more than one "
+                  "robot. That is allowed -- a survey is expected to pass "
+                  "through it -- but those robots will hear each other.")
+    return table
 
 
 def cmd_config(args) -> int:

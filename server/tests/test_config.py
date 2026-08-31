@@ -100,3 +100,33 @@ def test_mdns_can_be_turned_off_from_the_environment():
     """So a node whose network forbids multicast can be fixed from the unit file
     without editing a config."""
     assert load(environ={"MBRELAY_MDNS": "off"}).mdns.enabled is False
+
+
+# -- [registry] --------------------------------------------------------------
+def test_the_registry_defaults_to_on_beside_the_data_port():
+    cfg = load(environ={})
+    assert cfg.registry.enabled is True
+    assert cfg.registry.port == 8761
+    # "" means follow server.bind, so one bind setting covers both listeners.
+    assert cfg.registry.bind == ""
+    assert cfg.registry.names == {}
+
+
+def test_pinned_names_are_read_as_a_table(tmp_path):
+    """A channel survey's output lands here, so it has to survive the config
+    merge intact rather than being flattened into keys."""
+    path = tmp_path / "c.toml"
+    path.write_text('[registry.names]\ntovez = "12/4"\nvevov = "14/4"\n')
+    assert load(path, environ={}).registry.names == {"tovez": "12/4", "vevov": "14/4"}
+
+
+def test_an_unknown_key_in_registry_is_still_fatal(tmp_path):
+    path = tmp_path / "c.toml"
+    path.write_text('[registry]\nprot = 8761\n')
+    with pytest.raises(ConfigError, match="unknown key 'prot'"):
+        load(path, environ={})
+
+
+def test_the_registry_port_can_come_from_the_environment():
+    """So the unit file can move it without editing a config file."""
+    assert load(environ={"MBRELAY_REGISTRY_PORT": "9999"}).registry.port == 9999

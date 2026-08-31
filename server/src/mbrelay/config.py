@@ -183,6 +183,30 @@ class MdnsConfig:
 
 
 @dataclass(frozen=True)
+class RegistryConfig:
+    """The name registry and its HTTP API (registry.py, httpapi.py).
+
+    Its own TCP port because the callers are not on this box: somebody building
+    a robot config or running a channel survey has to ask the relay where a
+    robot is, and the admin socket is deliberately unreachable from off-box.
+    Unauthenticated on purpose -- an internal lab service whose whole content is
+    which radio channel a robot sits on.
+
+    ``names`` pins assignments, as "<channel>/<group>":
+
+        [registry.names]
+        tovez = "12/4"
+
+    A pin is the survey's output and outranks anything set through the API, so
+    a restart cannot quietly reinstate a stale learned value.
+    """
+    enabled: bool = True
+    bind: str = ""              # "" follows server.bind
+    port: int = 8761
+    names: dict[str, str] = field(default_factory=dict)   # name -> "channel/group"
+
+
+@dataclass(frozen=True)
 class StateConfig:
     dir: str = ""               # identity cache lives here as devices.json
     shutdown_grace_s: int = 20  # systemd TimeoutStopSec must exceed this
@@ -200,6 +224,7 @@ class Config:
     state: StateConfig = field(default_factory=StateConfig)
     mdns: MdnsConfig = field(default_factory=MdnsConfig)
     client: ClientConfig = field(default_factory=ClientConfig)
+    registry: RegistryConfig = field(default_factory=RegistryConfig)
 
     # Populated by load(): "server.port" -> "/etc/mbrelay/mbrelay.toml"
     sources: dict[str, str] = field(default_factory=dict, compare=False)
@@ -225,6 +250,7 @@ _SECTIONS = {
     "server": ServerConfig, "serial": SerialConfig, "devices": DevicesConfig,
     "session": SessionConfig, "admin": AdminConfig, "firmware": FirmwareConfig,
     "log": LogConfig, "state": StateConfig, "mdns": MdnsConfig,
+    "registry": RegistryConfig,
 }
 
 # Env var name -> (section, key). Only the knobs an operator plausibly overrides
@@ -233,6 +259,7 @@ _ENV = {
     "MBRELAY_TARGET": ("client", "target"),
     "MBRELAY_BIND": ("server", "bind"),
     "MBRELAY_PORT": ("server", "port"),
+    "MBRELAY_REGISTRY_PORT": ("registry", "port"),
     "MBRELAY_LOG_LEVEL": ("log", "level"),
     "MBRELAY_LOG_FORMAT": ("log", "format"),
     "MBRELAY_SOCKET": ("admin", "socket"),

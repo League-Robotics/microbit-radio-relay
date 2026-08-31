@@ -53,6 +53,14 @@ class DaemonNotRunning(AdminError):
         super().__init__(f"no mbrelay daemon listening at {path}", code="not_running")
 
 
+class RegistryError(MbrelayError):
+    """The name registry refused a lookup or an assignment."""
+
+    def __init__(self, message: str, code: str = "error") -> None:
+        self.code = code
+        super().__init__(message)
+
+
 # Stable process exit codes. HIL tests and Ansible branch on these, so they are
 # part of the public interface -- do not renumber.
 EXIT_OK = 0

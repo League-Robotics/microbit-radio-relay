@@ -17,8 +17,10 @@ import time
 from . import __version__
 from .admin import AdminServer
 from .errors import MbrelayError, NoFreeDevice
+from .httpapi import HttpApi
 from .inventory import Inventory
 from .mdns import Advertiser
+from .registry import NameRegistry
 from .relay import RelayControl
 from .session import SessionManager
 from .transport import (PySerialScanner, SerialChannelFactory, enable_keepalive)
@@ -148,9 +150,12 @@ class Daemon:
             low_water=cfg.serial.write_low_water)
         self.control = RelayControl(cfg)
         self.inventory = Inventory(cfg, PySerialScanner(), prober=self._probe)
-        self.sessions = SessionManager(cfg, self.inventory, self.factory, self.control)
+        self.registry = NameRegistry(cfg)
+        self.sessions = SessionManager(cfg, self.inventory, self.factory, self.control,
+                                       registry=self.registry)
         self.admin = AdminServer(self)
         self.advertiser = Advertiser(self)
+        self.httpapi = HttpApi(self)
         self.server: asyncio.AbstractServer | None = None
         self.conns_total = 0
         self._tasks: set[asyncio.Task] = set()
@@ -177,6 +182,7 @@ class Daemon:
             pass
 
         await self.admin.start()
+        self.registry.load()
         await self.inventory.start()
 
         def factory() -> RelayProtocol:
@@ -197,6 +203,9 @@ class Daemon:
                 f"(systemctl status mbrelay), or choose a different port."
             ) from exc
 
+        # The registry API before the advertisement, so the TXT record can name
+        # the port it actually got.
+        await self.httpapi.start()
         # Only now: the listener has to exist before its port is announced, and
         # with server.port = 0 the real port is only knowable from the socket.
         await self.advertiser.start()
@@ -224,6 +233,7 @@ class Daemon:
         # Before the task sweep: killing the publisher is what withdraws the
         # advertisement, and a record that outlives the daemon is worse than none.
         await self.advertiser.stop()
+        await self.httpapi.stop()
         await self.inventory.stop()
         await self.admin.stop()
         for task in list(self._tasks):
@@ -249,4 +259,7 @@ class Daemon:
             }],
             "devices": counts,
             "sessions": self.sessions.to_json(),
+            "registry": {**self.httpapi.to_json(),
+                         "names": len(self.registry.all()),
+                         "conflicts": len(self.registry.conflicts())},
         }
