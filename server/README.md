@@ -19,7 +19,9 @@ nc some-host 8760                  # from anywhere
 ```bash
 mbrelay devices                    # what is attached, and what state it is in
 mbrelay status                     # daemon health and live sessions
-mbrelay connect host:8760          # a terminal on a served relay
+mbrelay discover                   # relay hosts advertising themselves on the LAN
+mbrelay connect                    # a terminal on a relay, host found by itself
+mbrelay connect host:8760          # or name it, which skips discovery entirely
 mbrelay flash --all-relays         # reflash every board (needs mbdeploy)
 mbrelay kick s-3                   # boot a session off a board
 mbrelay reset vevov                # force one board back to defaults

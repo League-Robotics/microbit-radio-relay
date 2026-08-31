@@ -148,6 +148,14 @@ class FirmwareConfig:
 
 
 @dataclass(frozen=True)
+class ClientConfig:
+    # Where `mbrelay connect` goes when the command line names no relay host:
+    # `mbrelay connect tovez` (a robot) or a bare `mbrelay connect`. "host" or
+    # "host:port". Empty means browse the LAN, then fall back to 127.0.0.1:8760.
+    target: str = ""
+
+
+@dataclass(frozen=True)
 class LogConfig:
     level: str = "info"
     format: str = "text"        # text | json
@@ -155,6 +163,23 @@ class LogConfig:
     # question, so it is off and separate from the log level.
     serial_trace: bool = False
     trace_bytes: int = 0
+
+
+@dataclass(frozen=True)
+class MdnsConfig:
+    """Announcing this host on the LAN, so clients need not be told an address.
+
+    A convenience, never a requirement: if the publisher is missing or
+    avahi-daemon is down the daemon logs one warning and carries on serving
+    boards. Set enabled = false on a node whose network forbids multicast.
+    """
+    enabled: bool = True
+    service: str = "_mbrelay._tcp"      # unregistered with IANA, which is legal:
+                                        # RFC 6763 s7 allows up to 15 characters
+    instance: str = ""                  # "" derives it from the hostname
+    # Resolved with shutil.which, falling back to the other known publishers, the
+    # same way firmware.mbdeploy is resolved. dns-sd is the macOS spelling.
+    publish_cmd: str = "avahi-publish"
 
 
 @dataclass(frozen=True)
@@ -173,6 +198,8 @@ class Config:
     firmware: FirmwareConfig = field(default_factory=FirmwareConfig)
     log: LogConfig = field(default_factory=LogConfig)
     state: StateConfig = field(default_factory=StateConfig)
+    mdns: MdnsConfig = field(default_factory=MdnsConfig)
+    client: ClientConfig = field(default_factory=ClientConfig)
 
     # Populated by load(): "server.port" -> "/etc/mbrelay/mbrelay.toml"
     sources: dict[str, str] = field(default_factory=dict, compare=False)
@@ -194,14 +221,16 @@ def _section_dict(section) -> dict[str, Any]:
 # loading
 # --------------------------------------------------------------------------
 _SECTIONS = {
+    "client": ClientConfig,
     "server": ServerConfig, "serial": SerialConfig, "devices": DevicesConfig,
     "session": SessionConfig, "admin": AdminConfig, "firmware": FirmwareConfig,
-    "log": LogConfig, "state": StateConfig,
+    "log": LogConfig, "state": StateConfig, "mdns": MdnsConfig,
 }
 
 # Env var name -> (section, key). Only the knobs an operator plausibly overrides
 # from a unit file; everything else belongs in the config file.
 _ENV = {
+    "MBRELAY_TARGET": ("client", "target"),
     "MBRELAY_BIND": ("server", "bind"),
     "MBRELAY_PORT": ("server", "port"),
     "MBRELAY_LOG_LEVEL": ("log", "level"),
@@ -209,6 +238,7 @@ _ENV = {
     "MBRELAY_SOCKET": ("admin", "socket"),
     "MBRELAY_STATE_DIR": ("state", "dir"),
     "MBRELAY_HEX": ("firmware", "hex"),
+    "MBRELAY_MDNS": ("mdns", "enabled"),
 }
 
 
@@ -348,9 +378,11 @@ def _apply_derived_defaults(cfg: Config, sources: dict[str, str]) -> Config:
     state_dir = cfg.state.dir or _default_state_dir()
     admin_sock = cfg.admin.socket or _default_socket_path()
     registry = cfg.firmware.registry or str(Path(state_dir) / "mbdeploy-registry.json")
+    instance = cfg.mdns.instance or _default_instance()
 
     for dotted, value in (("state.dir", state_dir), ("admin.socket", admin_sock),
-                          ("firmware.registry", registry)):
+                          ("firmware.registry", registry),
+                          ("mdns.instance", instance)):
         sources.setdefault(dotted, "derived default")
         _ = value
 
@@ -359,7 +391,20 @@ def _apply_derived_defaults(cfg: Config, sources: dict[str, str]) -> Config:
         state=dataclasses.replace(cfg.state, dir=state_dir),
         admin=dataclasses.replace(cfg.admin, socket=admin_sock),
         firmware=dataclasses.replace(cfg.firmware, registry=registry),
+        mdns=dataclasses.replace(cfg.mdns, instance=instance),
     )
+
+
+def _default_instance() -> str:
+    """The DNS-SD instance name: the short hostname.
+
+    Unique on a LAN and readable in a picker, which is what an instance name is
+    for. It does change when a node is re-imaged; if a stable identity ever
+    matters, the answer is a uid= key in the TXT taken from /etc/machine-id
+    (which stays readable under ProtectSystem=strict), not a different name here.
+    """
+    import socket
+    return socket.gethostname().split(".")[0] or "mbrelay"
 
 
 def _default_state_dir() -> str:

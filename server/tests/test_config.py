@@ -73,3 +73,30 @@ def test_mbdeploy_registry_does_not_collide_with_the_identity_cache(tmp_path):
     identity_cache = Path(cfg.state.dir) / "devices.json"
     assert Path(cfg.firmware.registry) != identity_cache
     assert Path(cfg.firmware.registry).parent == Path(cfg.state.dir)
+
+
+# -- [mdns] -----------------------------------------------------------------
+def test_mdns_defaults_to_on_with_a_hostname_derived_instance():
+    import socket
+
+    cfg = load(environ={})
+    assert cfg.mdns.enabled is True
+    assert cfg.mdns.service == "_mbrelay._tcp"
+    assert cfg.mdns.instance == socket.gethostname().split(".")[0]
+    assert cfg.sources["mdns.instance"] == "derived default"
+
+
+def test_an_unknown_key_in_mdns_is_still_fatal(tmp_path):
+    """Registering the section buys the same typo protection as every other one,
+    which is the whole reason it goes through _SECTIONS rather than being read
+    on the side."""
+    path = tmp_path / "c.toml"
+    path.write_text('[mdns]\nenable = false\n')
+    with pytest.raises(ConfigError, match="unknown key 'enable'"):
+        load(path, environ={})
+
+
+def test_mdns_can_be_turned_off_from_the_environment():
+    """So a node whose network forbids multicast can be fixed from the unit file
+    without editing a config."""
+    assert load(environ={"MBRELAY_MDNS": "off"}).mdns.enabled is False

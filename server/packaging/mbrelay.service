@@ -11,6 +11,10 @@ SupplementaryGroups=dialout plugdev
 RuntimeDirectory=mbrelay
 RuntimeDirectoryMode=0755
 StateDirectory=mbrelay
+# LAN discovery (`mbrelay discover`) additionally wants avahi-utils installed
+# and avahi-daemon running. Neither is required: without them the daemon logs one
+# warning and serves boards exactly as before. ProtectSystem=strict leaves /run
+# alone, so the publisher still reaches /run/dbus/system_bus_socket.
 ExecStart=/usr/local/bin/mbrelay serve --config /etc/mbrelay/mbrelay.toml
 Restart=on-failure
 RestartSec=3

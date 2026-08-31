@@ -56,11 +56,14 @@ the pool.
 ## Connecting
 
 ```bash
-# Anything that speaks bytes works.
-nc <host> <port>
+# You do not have to know the address: the servers announce themselves.
+mbrelay connect
 
-# Or the bundled terminal, which sets TCP_NODELAY for you.
+# Or name one. A typed address skips discovery entirely.
 mbrelay connect <host>:<port>
+
+# Anything that speaks bytes works, too.
+nc <host> <port>
 ```
 
 From Python, with no dependency on `mbrelay` at all:
@@ -82,8 +85,27 @@ which can add tens of milliseconds to a radio round-trip. If you pace your
 writes a few hundred milliseconds apart you will not notice the difference —
 but it costs nothing to set, and it matters as soon as you send back-to-back.
 
-Ask your fleet administrator for the host and port. They are recorded on the
-internal wiki, not here.
+### Which server?
+
+`mbrelay discover` lists every relay server advertising itself on your network:
+
+```
+$ mbrelay discover
+NAME     HOST            ADDRESS       PORT  VERSION
+-------  --------------  ------------  ----  ------------
+torture  torture.local   192.168.1.12  8760  0.20260826.9
+agony    agony.local     192.168.1.19  8760  0.20260826.9
+```
+
+`mbrelay connect` with no address does the same lookup for you: one server and it
+connects straight away, several and it asks which. Add `--probe` to `discover` to
+see which of them is actually answering on its port, as opposed to merely
+advertising.
+
+If nothing is listed you are probably on a different network from the servers —
+discovery is link-local and does not cross a router or most VPNs. Name the
+address instead (`mbrelay connect 192.168.1.12:8760`); everything else works the
+same.
 
 ## You do not always need `!GO`
 

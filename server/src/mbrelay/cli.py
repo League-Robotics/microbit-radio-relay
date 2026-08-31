@@ -119,15 +119,40 @@ def build_parser() -> argparse.ArgumentParser:
     f.add_argument("--yes", "-y", action="store_true", help="skip the confirmation")
     f.set_defaults(func=cmd_flash)
 
+    dc = sub.add_parser("discover", help="find relay hosts on the LAN")
+    dc.add_argument("--timeout", type=float, default=1.5, metavar="SECONDS",
+                    help="how long to listen for answers (default 1.5)")
+    dc.add_argument("--probe", action="store_true",
+                    help="also TCP-connect to each host and report whether it answers")
+    dc.add_argument("--interface", action="append", default=[], metavar="ADDR",
+                    help="query from this local address instead of letting the "
+                         "kernel choose; repeatable")
+    dc.add_argument("--service", metavar="TYPE", help="DNS-SD service type")
+    dc.set_defaults(func=cmd_discover)
+
     c = sub.add_parser("connect", help="open a terminal on a served relay")
-    c.add_argument("target", nargs="?", default="127.0.0.1:8760",
-                   help="HOST:PORT (default 127.0.0.1:8760)")
+    # default=None, not the literal fallback: "omitted" has to be
+    # distinguishable from "typed 127.0.0.1:8760", or discovery can never run.
+    c.add_argument("target", nargs="?", default=None,
+                   help="HOST[:PORT]; or a ROBOT name such as tovez, or ROBOT@HOST, "
+                        "to be tuned to that robot with !N and dropped into the data "
+                        "plane; omit it to find a relay host on the LAN")
+    c.add_argument("--no-probe", action="store_true",
+                   help="after tuning to a robot, do not PING it")
     c.add_argument("--send", action="append", default=[], metavar="LINE")
     c.add_argument("--expect", metavar="REGEX")
     c.add_argument("--timeout", type=float, default=10.0)
     c.add_argument("--raw", action="store_true", default=True)
     c.add_argument("--escape", default="]", metavar="CHAR")
     c.add_argument("--log", metavar="FILE")
+    # --timeout is already the run_script budget, so the browse budget needs its
+    # own name rather than a second meaning for one flag.
+    c.add_argument("--discover", dest="discover", action="store_true", default=None,
+                   help="find the host on the LAN; with a TARGET, treat it as the "
+                        "advertised name to pick")
+    c.add_argument("--no-discover", dest="discover", action="store_false",
+                   help="never browse; fall straight back to 127.0.0.1:8760")
+    c.add_argument("--discover-timeout", type=float, default=1.5, metavar="SECONDS")
     c.set_defaults(func=cmd_connect)
 
     cf = sub.add_parser("config", help="inspect the merged configuration")
@@ -266,6 +291,8 @@ def cmd_status(args) -> int:
                   f"up {status['uptime_s']:.0f}s")
             print(f"listening {listener['addr']}  "
                   f"accepted {listener['accepted']}  rejected {listener['rejected']}")
+            if listener.get("advertised"):
+                print(f"advertising {listener['advertised']}")
             print(f"devices: {d['total']} total, {d['free']} free, "
                   f"{d['busy']} busy, {d['error']} error")
             if status["sessions"]:
@@ -479,15 +506,151 @@ def _unquiesce(args, uids: list[str]) -> None:
         pass
 
 
-def cmd_connect(args) -> int:
-    from .client import connect, interactive, parse_target, run_script
+DEFAULT_TARGET = "127.0.0.1:8760"
 
-    host, port = parse_target(args.target)
+
+def cmd_discover(args) -> int:
+    # Deferred like every other import that is not needed on every invocation --
+    # and it is also what makes monkeypatching the browser in tests bite.
+    from .mdns import browse_detailed, probe
+
+    cfg = _config(args)
+    # The only inspection command that turns logging on for itself. "Found
+    # nothing" is the common outcome here and the reason for it -- a neighbour's
+    # malformed datagram, a reply with somebody else's transaction id -- is only
+    # visible at debug, so `mbrelay -vv discover` has to actually show it.
+    if getattr(args, "verbose", 0):
+        from .logs import setup as setup_logging
+        setup_logging(cfg.log.level, cfg.log.format)
+
+    result = browse_detailed(args.service or cfg.mdns.service, args.timeout,
+                             interfaces=tuple(args.interface))
+    live = {s.instance: probe(s) for s in result.services} if args.probe else {}
+
+    if args.json:
+        _emit(args, {
+            "source": result.source,
+            "elapsed_s": round(result.elapsed, 3),
+            "problem": result.problem,
+            "hosts": [dict({"name": s.instance, "host": s.hostname,
+                            "addresses": list(s.addresses), "port": s.port,
+                            "version": s.version, "txt": s.txt},
+                           **({"live": live[s.instance]} if args.probe else {}))
+                      for s in result.services],
+        })
+        return EXIT_OK
+
+    if not result.services:
+        # Finding nothing is not a failure -- naming a host still works, and
+        # always did. Say why, the way `devices` explains its USB fallback.
+        print(f"mbrelay: {result.problem}", file=sys.stderr)
+        return EXIT_OK
+
+    headers = ["NAME", "HOST", "ADDRESS", "PORT", "VERSION"]
+    rows = [[s.instance, s.hostname or "-", s.addresses[0] if s.addresses else "-",
+             s.port, s.version or "-"] for s in result.services]
+    if args.probe:
+        headers.append("LIVE")
+        for row, service in zip(rows, result.services):
+            row.append("yes" if live[service.instance] else "no")
+    print(_table(rows, headers))
+    return EXIT_OK
+
+
+def _resolve_by_discovery(args, cfg, wanted: str | None = None):
+    """Pick a relay host by mDNS. Returns "host:port", or an exit code.
+
+    `wanted` is the advertised host name to insist on; by default the command
+    line target. `mbrelay connect tovez` passes the robot's relay host (or
+    None for "any"), since its target names a robot, not a host.
+    """
+    from .mdns import browse_detailed
+
+    wanted = ((args.target if wanted is None else wanted) or "").strip().lower()
+    # One answer is enough when any host will do, so stop as soon as it resolves.
+    # When a particular name was asked for, sit out the full budget: returning
+    # early would mean returning whichever host happened to answer first.
+    result = browse_detailed(cfg.mdns.service, args.discover_timeout,
+                             expect=0 if wanted else 1)
+    hosts = [s for s in result.services
+             if not wanted or wanted in (s.instance.lower(), s.hostname.lower())]
+
+    if not hosts:
+        if wanted:
+            others = ", ".join(service.instance for service in result.services)
+            detail = result.problem or (f"hosts that did answer: {others}"
+                                        if others else "")
+            print(f"mbrelay: no relay host named {args.target!r} answered."
+                  f"{' ' + detail if detail else ''}", file=sys.stderr)
+            return EXIT_USAGE
+        print(f"mbrelay: {result.problem} Trying {DEFAULT_TARGET}.", file=sys.stderr)
+        return DEFAULT_TARGET
+    if len(hosts) == 1:
+        # "#" is the relay's own comment convention, so this line is inert to
+        # anything already reading the stream.
+        print(f"# discovered {hosts[0].instance} at {hosts[0].endpoint}",
+              file=sys.stderr)
+        return hosts[0].endpoint
+    return _pick_host(hosts)
+
+
+def _pick_host(hosts):
+    """The numbered picker, following the flash confirmation exactly.
+
+    Summary first with plain print, prompt gated on isatty so a pipeline or CI
+    can never block on it, and declining is success rather than an error.
+    """
+    print(f"{len(hosts)} relay hosts found:")
+    for index, service in enumerate(hosts, 1):
+        print(f"  {index}) {service.instance:<12} {service.endpoint:<24} "
+              f"{service.version or '-'}")
+    if not sys.stdin.isatty():
+        print(f"mbrelay: several relay hosts found; name one, e.g. "
+              f"'mbrelay connect {hosts[0].endpoint}'", file=sys.stderr)
+        return EXIT_USAGE
+    answer = input(f"Which? [1-{len(hosts)}, or q] ").strip()
+    if not answer or answer[0].lower() == "q":
+        return EXIT_OK
+    if not answer.isdigit() or not 1 <= int(answer) <= len(hosts):
+        print(f"mbrelay: {answer!r} is not one of 1-{len(hosts)}", file=sys.stderr)
+        return EXIT_USAGE
+    return hosts[int(answer) - 1].endpoint
+
+
+def cmd_connect(args) -> int:
+    from .client import (RobotTuneError, connect, interactive, parse_connect_target,
+                         parse_target, run_script, tune_to_robot)
+
+    try:
+        want = parse_connect_target(args.target)
+    except ValueError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_USAGE
+
+    # Which relay host: named on the command line (HOST or ROBOT@HOST), else
+    # [client] target from the config, else browse the LAN, else localhost.
+    cfg = _config(args)
+    target = want.endpoint
+    configured = cfg.client.target.strip()
+    if args.discover or (args.discover is None and target is None and not configured):
+        resolved = _resolve_by_discovery(args, cfg, wanted=want.host or "")
+        if isinstance(resolved, int):       # an exit code, not a host
+            return resolved
+        target = resolved
+
+    host, port = parse_target(target or configured or DEFAULT_TARGET)
     try:
         sock = connect(host, port)
     except OSError as exc:
         print(f"mbrelay: cannot connect to {host}:{port}: {exc}", file=sys.stderr)
         return EXIT_ERROR
+    if want.robot:
+        try:
+            tune_to_robot(sock, want.robot, probe=not args.no_probe)
+        except RobotTuneError as exc:
+            sock.close()
+            print(f"mbrelay: {exc}", file=sys.stderr)
+            return EXIT_HARDWARE
     if args.send or args.expect:
         try:
             return run_script(sock, args.send, args.expect, args.timeout)
@@ -511,11 +674,15 @@ def cmd_config(args) -> int:
 
 
 def cmd_install_unit(args) -> int:
-    from .packaging_assets import SYSTEMD_UNIT, UDEV_RULE
+    from .packaging_assets import AVAHI_SERVICE, SYSTEMD_UNIT, UDEV_RULE
     print("# ---- /etc/systemd/system/mbrelay.service ----")
     print(SYSTEMD_UNIT)
     print("# ---- /etc/udev/rules.d/99-microbit-relay.rules ----")
     print(UDEV_RULE)
+    print("# ---- /etc/avahi/services/mbrelay.service ----")
+    print("# Optional, and only if you set [mdns] enabled = false: the daemon")
+    print("# already publishes this itself through avahi-publish.")
+    print(AVAHI_SERVICE)
     return EXIT_OK
 
 

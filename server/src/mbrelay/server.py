@@ -18,6 +18,7 @@ from . import __version__
 from .admin import AdminServer
 from .errors import MbrelayError, NoFreeDevice
 from .inventory import Inventory
+from .mdns import Advertiser
 from .relay import RelayControl
 from .session import SessionManager
 from .transport import (PySerialScanner, SerialChannelFactory, enable_keepalive)
@@ -149,6 +150,7 @@ class Daemon:
         self.inventory = Inventory(cfg, PySerialScanner(), prober=self._probe)
         self.sessions = SessionManager(cfg, self.inventory, self.factory, self.control)
         self.admin = AdminServer(self)
+        self.advertiser = Advertiser(self)
         self.server: asyncio.AbstractServer | None = None
         self.conns_total = 0
         self._tasks: set[asyncio.Task] = set()
@@ -195,6 +197,10 @@ class Daemon:
                 f"(systemctl status mbrelay), or choose a different port."
             ) from exc
 
+        # Only now: the listener has to exist before its port is announced, and
+        # with server.port = 0 the real port is only knowable from the socket.
+        await self.advertiser.start()
+
         counts = self.inventory.counts()
         log.info("daemon_start version=%s pid=%d", __version__, __import__("os").getpid())
         log.info("listen addr=%s:%d devices=%d free=%d admin=%s",
@@ -215,6 +221,9 @@ class Daemon:
             self.server.close()
             await self.server.wait_closed()
         await self.sessions.shutdown(self.cfg.state.shutdown_grace_s)
+        # Before the task sweep: killing the publisher is what withdraws the
+        # advertisement, and a record that outlives the daemon is worse than none.
+        await self.advertiser.stop()
         await self.inventory.stop()
         await self.admin.stop()
         for task in list(self._tasks):
@@ -236,6 +245,7 @@ class Daemon:
                 "conns_total": self.conns_total,
                 "accepted": self.sessions.accepted_total,
                 "rejected": self.sessions.rejected_total,
+                "advertised": self.advertiser.state,
             }],
             "devices": counts,
             "sessions": self.sessions.to_json(),

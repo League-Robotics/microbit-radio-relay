@@ -1,4 +1,4 @@
-"""The systemd unit and udev rule, as strings.
+"""The systemd unit, udev rule, and avahi service file, as strings.
 
 Shipped inside the package so ``mbrelay install-unit --print`` works on any host,
 including one where only the wheel landed. It prints; it never writes -- on the
@@ -20,6 +20,10 @@ SupplementaryGroups=dialout plugdev
 RuntimeDirectory=mbrelay
 RuntimeDirectoryMode=0755
 StateDirectory=mbrelay
+# LAN discovery (`mbrelay discover`) additionally wants avahi-utils installed
+# and avahi-daemon running. Neither is required: without them the daemon logs one
+# warning and serves boards exactly as before. ProtectSystem=strict leaves /run
+# alone, so the publisher still reaches /run/dbus/system_bus_socket.
 ExecStart=/usr/local/bin/mbrelay serve --config /etc/mbrelay/mbrelay.toml
 Restart=on-failure
 RestartSec=3
@@ -45,4 +49,24 @@ UDEV_RULE = """\
 # BBC micro:bit DAPLink interface (V1 and V2).
 SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idVendor}=="0d28", ATTRS{idProduct}=="0204", \\
   GROUP="dialout", MODE="0660", SYMLINK+="microbit/$attr{serial}"
+"""
+
+
+# The static alternative to the supervised avahi-publish child, for nodes where
+# Ansible would rather drop a file than trust a daemon to spawn a helper. Set
+# [mdns] enabled = false when you use this, or the host advertises twice.
+#
+# %h expands to the hostname, matching the instance name the daemon would derive.
+# The port is NOT substituted -- edit it if server.port is not 8760.
+AVAHI_SERVICE = """\
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">%h</name>
+  <service>
+    <type>_mbrelay._tcp</type>
+    <port>8760</port>
+    <txt-record>txtvers=1</txt-record>
+  </service>
+</service-group>
 """

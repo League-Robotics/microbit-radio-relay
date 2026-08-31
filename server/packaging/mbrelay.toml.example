@@ -86,3 +86,23 @@ shutdown_grace_s = 20
 [log]
 level = "info"
 format = "text"                 # "json" for log shippers
+
+[mdns]
+# Announce this host on the LAN, so clients can run `mbrelay connect` with no
+# address and `mbrelay discover` can list the fleet. Needs avahi-utils installed
+# and avahi-daemon running; without them the daemon logs one warning at startup
+# and serves boards exactly as before. Discovery is never a prerequisite.
+enabled = true
+
+# _mbrelay._tcp is not registered with IANA, which is legal -- RFC 6763 allows
+# up to 15 characters. Change it only if you run two independent fleets on one
+# LAN, and change it on the clients too.
+service = "_mbrelay._tcp"
+
+# The name shown by `mbrelay discover`. Empty means the short hostname, which is
+# unique on a LAN and readable in a picker.
+# instance = "bench-1"
+
+# Resolved with which(1), falling back to the other known publishers, so a macOS
+# dev host advertises through dns-sd without any configuration.
+publish_cmd = "avahi-publish"

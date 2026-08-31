@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,7 +21,7 @@ def test_every_documented_subcommand_parses():
     for argv in (["serve"], ["devices"], ["list"], ["status"], ["sessions"],
                  ["kick", "s-1"], ["reset", "vevov"], ["disable", "x"], ["enable", "x"],
                  ["rescan"], ["events"], ["ping"], ["flash", "--all-relays"],
-                 ["connect"], ["config", "show"], ["install-unit"]):
+                 ["connect"], ["discover"], ["config", "show"], ["install-unit"]):
         assert parser.parse_args(argv).func is not None
 
 
@@ -102,6 +104,10 @@ def test_install_unit_prints_both_artifacts(capsys):
     assert main(["install-unit"]) == EXIT_OK
     out = capsys.readouterr().out
     assert "[Unit]" in out and "SUBSYSTEM==" in out
+    assert "<type>_mbrelay._tcp</type>" in out           # the avahi service file
+    # avahi-utils is not installed by default on Ubuntu Server, so the unit has
+    # to say that discovery wants it -- and that nothing breaks without it.
+    assert "avahi-utils" in out
     # The unit must outlive the drain, or systemd kills the daemon while it is
     # still handing boards back.
     assert "TimeoutStopSec=30" in out
@@ -188,6 +194,171 @@ def test_flash_of_an_absent_board_reports_no_device(monkeypatch, tmp_path, capsy
     code = main(["flash", "nosuchboard", "--hex", str(hexfile),
                  "--yes"])
     assert code == EXIT_NO_DEVICE
+
+
+def test_the_shipped_packaging_files_match_the_strings_in_the_wheel(tmp_path):
+    """packaging/ is sdist-only and packaging_assets.py is what a wheel-only host
+    gets, so the two are duplicates by construction. Nothing pinned them
+    together, which is exactly how they drift."""
+    from mbrelay.packaging_assets import SYSTEMD_UNIT, UDEV_RULE
+
+    packaging = Path(__file__).resolve().parent.parent / "packaging"
+    if not packaging.is_dir():
+        pytest.skip("packaging/ is not shipped in the wheel")
+    assert (packaging / "mbrelay.service").read_text() == SYSTEMD_UNIT
+    assert (packaging / "99-microbit-relay.rules").read_text() == UDEV_RULE
+
+
+# -- discover and auto-connect ----------------------------------------------
+def found(*services, problem=""):
+    """A stand-in for mbrelay.mdns.browse_detailed that answers instantly."""
+    from mbrelay.mdns import BrowseResult
+
+    def browse(*args, **kwargs):
+        return BrowseResult(services=tuple(services), problem=problem,
+                            source="192.168.1.40", elapsed=0.0, queries=3)
+    return browse
+
+
+def host(instance="torture", address="192.0.2.12", port=8760,
+         version="0.20260826.9"):
+    from mbrelay.mdns import Service
+
+    return Service(instance=instance, hostname=f"{instance}.local",
+                   addresses=(address,), port=port,
+                   txt={"txtvers": "1", "version": version})
+
+
+@pytest.fixture
+def dialled(monkeypatch):
+    """Record what connect() was asked for, without opening a socket.
+
+    Every address in these tests is in the RFC 5737 documentation range, but a
+    unit test must not reach the network even to be refused -- the bench has
+    real relays on 192.168.1.0/24 and the suite has to describe the code rather
+    than the room it runs in.
+    """
+    calls = []
+
+    def refuse(host, port, timeout=10.0):
+        calls.append((host, port))
+        raise OSError("refused by the test")
+
+    monkeypatch.setattr("mbrelay.client.connect", refuse)
+    return calls
+
+
+def test_discover_finding_nothing_is_success_and_says_why(monkeypatch, capsys):
+    """Naming a host still works and always did, so this is not an error."""
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed",
+                        found(problem="no _mbrelay._tcp nodes answered on 192.168.1.40"))
+    assert main(["discover"]) == EXIT_OK
+    assert "no _mbrelay._tcp nodes answered" in capsys.readouterr().err
+
+
+def test_discover_lists_what_it_found(monkeypatch, capsys):
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed",
+                        found(host(), host("agony", "192.0.2.19")))
+    assert main(["discover"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "NAME" in out and "torture" in out and "192.0.2.19" in out
+
+
+def test_discover_json_carries_the_source_address_it_queried_from(monkeypatch, capsys):
+    """A wrong NIC and a firewall drop look identical on the wire, so the source
+    is the first thing to check when the answer is empty."""
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed", found(host()))
+    assert main(["--json", "discover"]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["source"] == "192.168.1.40"
+    assert payload["hosts"][0]["name"] == "torture"
+    assert payload["hosts"][0]["port"] == 8760
+
+
+def test_connect_with_no_target_uses_the_one_host_it_found(monkeypatch, dialled,
+                                                           capsys):
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed", found(host()))
+    assert main(["connect"]) == EXIT_ERROR          # the dial itself is refused
+    assert dialled == [("192.0.2.12", 8760)]
+    assert "# discovered torture at 192.0.2.12:8760" in capsys.readouterr().err
+
+
+def test_connect_with_a_target_does_not_browse_at_all(monkeypatch, dialled):
+    """No discovery, no delay: a typed address is an instruction, not a hint."""
+    def refuse_to_browse(*args, **kwargs):
+        raise AssertionError("browsed despite being given a target")
+
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed", refuse_to_browse)
+    assert main(["connect", "198.51.100.7:9000"]) == EXIT_ERROR
+    assert dialled == [("198.51.100.7", 9000)]
+
+
+def test_connect_falls_back_to_localhost_when_nothing_answers(monkeypatch, dialled,
+                                                              capsys):
+    """Preserving what `mbrelay connect` did before discovery existed."""
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed", found(problem="nobody home."))
+    assert main(["connect"]) == EXIT_ERROR
+    assert dialled == [("127.0.0.1", 8760)]
+    assert "127.0.0.1:8760" in capsys.readouterr().err
+
+
+def test_no_discover_skips_the_browse_entirely(monkeypatch, dialled):
+    def refuse_to_browse(*args, **kwargs):
+        raise AssertionError("browsed despite --no-discover")
+
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed", refuse_to_browse)
+    assert main(["connect", "--no-discover"]) == EXIT_ERROR
+    assert dialled == [("127.0.0.1", 8760)]
+
+
+def test_connect_names_an_advertised_host_with_discover(monkeypatch, dialled):
+    """`--discover NAME` picks by advertised name; without the flag NAME is a
+    hostname and goes straight to the resolver, as it always has."""
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed",
+                        found(host(), host("agony", "192.0.2.19")))
+    assert main(["connect", "agony", "--discover"]) == EXIT_ERROR
+    assert dialled == [("192.0.2.19", 8760)]
+
+
+def test_connect_naming_a_host_that_did_not_answer_is_a_usage_error(monkeypatch,
+                                                                    dialled, capsys):
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed", found(host()))
+    assert main(["connect", "nosuchnode", "--discover"]) == EXIT_USAGE
+    assert dialled == []
+    assert "hosts that did answer: torture" in capsys.readouterr().err
+
+
+def test_several_hosts_and_no_terminal_is_a_usage_error_not_a_hung_pipe(
+        monkeypatch, dialled, capsys):
+    """A pipeline must never block on a prompt, and guessing which host a script
+    meant would be worse than saying so."""
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed",
+                        found(host(), host("agony", "192.0.2.19")))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+    assert main(["connect"]) == EXIT_USAGE
+    assert dialled == []
+    err = capsys.readouterr().err
+    assert "several relay hosts found" in err
+
+
+def test_the_picker_connects_to_the_numbered_choice(monkeypatch, dialled, capsys):
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed",
+                        found(host(), host("agony", "192.0.2.19")))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", lambda prompt: " 2 ")
+    assert main(["connect"]) == EXIT_ERROR
+    assert dialled == [("192.0.2.19", 8760)]
+    assert "2 relay hosts found:" in capsys.readouterr().out
+
+
+def test_declining_the_picker_is_success_not_an_error(monkeypatch, dialled):
+    """Following the flash confirmation: saying no is not a failure."""
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed",
+                        found(host(), host("agony", "192.0.2.19")))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True, raising=False)
+    monkeypatch.setattr("builtins.input", lambda prompt: "q")
+    assert main(["connect"]) == EXIT_OK
+    assert dialled == []
 
 
 # -- connect ----------------------------------------------------------------

@@ -139,6 +139,9 @@ nc relay-host 8760
 # Or the bundled terminal, which sets TCP_NODELAY for you.
 mbrelay connect relay-host:8760
 
+# Or let it find the host itself, which is what you want on a laptop.
+mbrelay connect
+
 # Or from Python, with no mbrelay dependency at all:
 import socket
 s = socket.create_connection(("relay-host", 8760))
@@ -151,6 +154,47 @@ s.sendall(b"hello over the radio")
 Set `TCP_NODELAY`. Nagle delays small writes that follow one another closely,
 which can add tens of milliseconds to a radio round-trip. Pacing writes a few
 hundred milliseconds apart hides the effect, but it costs nothing to set.
+
+### Finding the host without being told it
+
+The daemon advertises itself over mDNS as `_mbrelay._tcp`, so nobody has to know
+an address:
+
+```
+$ mbrelay discover
+NAME     HOST            ADDRESS       PORT  VERSION
+-------  --------------  ------------  ----  ------------
+torture  torture.local   192.168.1.12  8760  0.20260826.9
+agony    agony.local     192.168.1.19  8760  0.20260826.9
+
+$ mbrelay connect
+2 relay hosts found:
+  1) torture      192.168.1.12:8760        0.20260826.9
+  2) agony        192.168.1.19:8760        0.20260826.9
+Which? [1-2, or q] 1
+DEVICE:RADIOBRIDGE:relay:vevov:1779042496
+```
+
+With exactly one host it connects straight away; with none it says why and falls
+back to `127.0.0.1:8760`, which is what `mbrelay connect` did before discovery
+existed. **A typed target skips discovery entirely** — no browse, no delay. Use
+`--discover NAME` to pick by advertised name instead of by address, and
+`--no-discover` to never browse at all.
+
+`mbrelay discover --probe` adds a `LIVE` column by TCP-connecting to each host.
+That is the difference between "advertised" and "actually serving": a node whose
+daemon is crash-looping still looks perfect in a plain browse.
+
+The browser is stdlib — no `zeroconf`, no D-Bus, no new dependency. It binds an
+**ephemeral** UDP port rather than 5353, which under RFC 6762 §6.7 obliges every
+responder to answer by unicast straight back to it; that sidesteps the port
+mDNSResponder and avahi-daemon already own. `_mbrelay._tcp` is not registered
+with IANA, which is legal (RFC 6763 §7 allows 15 characters).
+
+Discovery is a **convenience and never a prerequisite**. Publishing needs
+`avahi-utils` on the node (`apt install avahi-utils`); without it the daemon logs
+one warning at startup and serves boards exactly as before. On macOS the daemon
+uses `dns-sd` instead, so a dev laptop advertises too.
 
 ### The radio is shared — check your channel
 
@@ -181,6 +225,7 @@ mbrelay kick s-3               # boot a session off a board
 mbrelay reset <name> --force   # force one board back to factory defaults
 mbrelay disable <name>         # take a board out of the pool
 mbrelay events --follow        # stream daemon events
+mbrelay discover               # relay hosts advertising themselves on the LAN
 mbrelay flash --all-relays     # reflash every board (needs mbdeploy)
 mbrelay config show            # merged config, and where each value came from
 ```
@@ -246,6 +291,10 @@ The knobs worth knowing:
 | `server.preamble` | `banner` | `none` to send nothing and let the client `HELLO`. |
 | `devices.allow` / `deny` | empty | Restrict which boards are offered. |
 | `devices.labels` | empty | Friendly names, keyed by UID. |
+| `mdns.enabled` | `true` | `false` on a network that forbids multicast. |
+| `mdns.instance` | the hostname | The name `mbrelay discover` shows. |
+| `mdns.service` | `_mbrelay._tcp` | Only to run two independent fleets on one LAN. |
+| `mdns.publish_cmd` | `avahi-publish` | Falls back to `dns-sd` on macOS. |
 | `state.shutdown_grace_s` | `20` | Must stay below the unit's `TimeoutStopSec`. |
 
 ## 8. Reflashing
