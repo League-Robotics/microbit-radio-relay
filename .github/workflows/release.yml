@@ -5,6 +5,12 @@ name: Release
 #   microbit_relayd-*.whl / .tar.gz  -- the server
 # The Ansible role in ros-deploy fetches both by tag, so this workflow is what
 # makes a deploy possible at all.
+#
+# Every build is published twice: once under its own vYYYYMMDD.N tag, which is
+# immutable and is what a pinned deploy names, and once under the moving tag
+# "latest", so a deploy that just wants the current firmware can fetch
+#   .../releases/download/latest/MICROBIT.hex
+# without first asking which version that is.
 on:
   push:
     tags: ['v*']
@@ -114,3 +120,30 @@ jobs:
           fi
           # --clobber so re-running the workflow replaces assets rather than failing.
           gh release upload "$TAG" assets/* --clobber
+
+      - name: Move the "latest" tag and release onto this build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Resolve through the API rather than the checkout: on workflow_dispatch
+          # the workspace is on the default branch, not on $TAG.
+          SHA=$(gh api "repos/$REPO/commits/$TAG" --jq .sha)
+
+          # Force-move refs/tags/latest; create it the first time through.
+          gh api -X PATCH "repos/$REPO/git/refs/tags/latest" \
+                 -f sha="$SHA" -F force=true >/dev/null 2>&1 \
+            || gh api -X POST "repos/$REPO/git/refs" \
+                      -f ref=refs/tags/latest -f sha="$SHA" >/dev/null
+
+          NOTES="Rolling pointer at the newest release. This build is [\`$TAG\`](https://github.com/$REPO/releases/tag/$TAG)."
+          # --latest=false keeps GitHub's "Latest" badge on the versioned release,
+          # so the release list still shows which version this actually is.
+          if gh release view latest >/dev/null 2>&1; then
+            gh release edit latest --title "latest ($TAG)" --notes "$NOTES" --latest=false
+          else
+            gh release create latest --title "latest ($TAG)" --notes "$NOTES" --latest=false
+          fi
+          gh release upload latest assets/* --clobber
