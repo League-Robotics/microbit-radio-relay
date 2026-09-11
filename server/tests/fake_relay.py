@@ -157,8 +157,11 @@ class FakeRelayFirmware:
             self._stored_channel, self._stored_group = c.channel, c.group
             self._save(); self._print_config()
         elif line.startswith(b"!CGT "):
+            parts = line.split()
+            if len(parts) != 3:
+                self._comment("error: usage !CGT <ch 0-83> <group 0-255>"); return
             try:
-                channel, group = (int(x) for x in line.split()[1:3])
+                channel, group = (int(x) for x in parts[1:3])
             except ValueError:
                 self._comment("error: usage !CGT <ch 0-83> <group 0-255>"); return
             if not (0 <= channel <= 83 and 0 <= group <= 255):

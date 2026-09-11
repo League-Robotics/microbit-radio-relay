@@ -1050,7 +1050,8 @@ namespace
         if (startsWith(line, "!CGT "))
         {
             int ch = -1, grp = -1;
-            if (sscanf(line + 5, "%d %d", &ch, &grp) == 2 &&
+            char extra = 0;
+            if (sscanf(line + 5, "%d %d %c", &ch, &grp, &extra) == 2 &&
                 ch >= 0 && ch <= 83 && grp >= 0 && grp <= 255)
             {
                 cfg.channel = ch;

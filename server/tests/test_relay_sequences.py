@@ -160,6 +160,17 @@ async def test_persisting_other_settings_after_cgt_keeps_the_saved_pair(cfg, fac
     assert (board.cfg.channel, board.cfg.group, board.cfg.power) == (12, 34, 6)
 
 
+async def test_transient_tune_rejects_extra_arguments(cfg, factory, control):
+    channel, reader = await _open(factory, control)
+    await control.hello(channel, reader)
+
+    channel.write_nowait(b"!CGT 47 60 99\n")
+    await channel.drain()
+    error = await reader.wait_for(
+        re.compile(rb"#\s*error:\s*usage !CGT <ch 0-83> <group 0-255>"), 0.5)
+    assert error
+
+
 async def test_reset_and_normalize_reopens_the_port(cfg, factory, control):
     """Release must reset the board, and reset means close AND reopen -- there is
     no other way out of the data plane."""
