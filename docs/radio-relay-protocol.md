@@ -80,7 +80,9 @@ never the data plane. The **configuration** persists.
 and reloaded at boot. They survive both a reset **and** a power-cycle, so a board
 configured once (e.g. "RAW250 echo on channel 1") comes back exactly that way
 when replugged or repowered. Writes are skipped when the value is unchanged, to
-spare the flash erase budget. Use `!DEFAULTS` to clear the saved record and fall
+spare the flash erase budget. `!CGT <ch> <group>` is the exception: it retunes the
+live radio immediately but does **not** rewrite flash, so the saved pair still
+applies after the next reset. Use `!DEFAULTS` to clear the saved record and fall
 back to the compiled-in defaults on the next reset (§3.6).
 
 > **Reset mechanics — and they are platform-specific.**
@@ -130,7 +132,8 @@ sending is done in the data plane after `!GO`, with no prefix.
 | Command            | Description                                                          |
 | ------------------ | ------------------------------------------------------------------- |
 | `!C <ch>`          | Set channel (0–35), forces group 10. Display shows the channel glyph. |
-| `!CG <ch> <group>` | Set channel (0–83) and group (0–255). Display shows `?`.            |
+| `!CG <ch> <group>` | Set channel (0–83) and group (0–255). Display shows `?`. Persists. |
+| `!CGT <ch> <group>`| Set channel (0–83) and group (0–255) for the current boot only. Display shows `?`. |
 | `!RC <ch> <group>` | Alias of `!CG`.                                                     |
 | `!P <0-7>`         | Set transmit power.                                                 |
 | `!MODE MAKECODE`   | Select 32-byte CODAL framing.                                       |
@@ -144,6 +147,8 @@ sending is done in the data plane after `!GO`, with no prefix.
 
 Config changes (`!C`, `!CG`/`!RC`, `!P`, `!MODE`, `!FRAG`, `!ECHO`) are applied
 immediately, persisted to flash (§2.1), and echoed back as a `#` comment.
+`!CGT` uses the same live retune path and the same `# channel: ... group: ...`
+echo, but it deliberately skips the flash write.
 
 **Debug commands** (compiled in by default; the whole facility is stripped when
 the firmware is built with `RELAY_DEBUG=0`):
@@ -161,13 +166,14 @@ lines is unaffected when debug is on.
 
 | Query     | Response (relay -> host, `#`-prefixed)                  |
 | --------- | ------------------------------------------------------- |
-| `?`       | `# channel: <ch> group: <g> mode: <m> power: <p>`       |
+| `?`       | `# channel: <ch> group: <g> mode: <m> power: <p>` then `# caps: CGT` |
 | `!MODE?`  | `# mode: MAKECODE` or `# mode: RAW250`                  |
 | `!DEBUG?` | `# debug: ON` or `# debug: OFF` (debug build only)      |
 
 Query support matters because the host cannot otherwise see relay state. Even
 though config persists across resets (§2.1), after opening the port the host
-should read config back rather than assume.
+should read config back rather than assume. The `caps:` line lets a host feature-
+detect optional command-plane extensions such as transient retuning.
 
 ### 3.4 Boot announcement
 

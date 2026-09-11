@@ -7,6 +7,7 @@ starts failing, the daemon is about to hand somebody a dirty board.
 from __future__ import annotations
 
 import asyncio
+import re
 
 import pytest
 
@@ -117,6 +118,46 @@ async def test_defaults_alone_does_not_change_live_state(cfg, factory, control):
     assert board.flash is None            # the stored record is gone ...
     assert board.cfg.channel == 20        # ... but the board is still on ch 20
     assert board.cfg.echo == "ON"
+
+
+async def test_transient_tune_changes_live_radio_but_not_saved_pair(cfg, factory, control):
+    board = FakeRelayFirmware(name="aaaaa", serial="1",
+                              stored=StoredConfig(channel=12, group=34))
+    factory.boards[PORT_A] = board
+    channel, reader = await _open(factory, control)
+    await control.hello(channel, reader)
+
+    channel.write_nowait(b"!CGT 47 60\n")
+    await channel.drain()
+    match = await reader.wait_for(CONFIG_RE, 0.5)
+    assert match
+    assert (board.cfg.channel, board.cfg.group) == (47, 60)
+    assert board.flash is not None
+    assert (board.flash.channel, board.flash.group) == (12, 34)
+
+    channel.write_nowait(b"?\n")
+    await channel.drain()
+    caps = await reader.wait_for(re.compile(rb"#\s*caps:\s*CGT"), 0.5)
+    assert caps, "query should advertise transient-tune support"
+
+    board.reset()
+    assert (board.cfg.channel, board.cfg.group) == (12, 34)
+
+
+async def test_persisting_other_settings_after_cgt_keeps_the_saved_pair(cfg, factory, control):
+    board = FakeRelayFirmware(name="aaaaa", serial="1",
+                              stored=StoredConfig(channel=12, group=34, power=3))
+    factory.boards[PORT_A] = board
+    channel, reader = await _open(factory, control)
+    await control.hello(channel, reader)
+
+    channel.write_nowait(b"!CGT 47 60\n!P 6\n")
+    await channel.drain()
+    match = await reader.wait_for(re.compile(rb"#\s*channel:\s*47\s+group:\s*60.*power:\s*6"), 0.5)
+    assert match
+
+    board.reset()
+    assert (board.cfg.channel, board.cfg.group, board.cfg.power) == (12, 34, 6)
 
 
 async def test_reset_and_normalize_reopens_the_port(cfg, factory, control):

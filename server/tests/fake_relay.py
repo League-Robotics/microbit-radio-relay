@@ -40,6 +40,8 @@ class FakeRelayFirmware:
         # dirty board hand one in here.
         self.flash: StoredConfig | None = stored
         self.cfg = replace(self.flash) if self.flash else replace(DEFAULTS)
+        self._stored_channel = self.cfg.channel
+        self._stored_group = self.cfg.group
         self.plane = "command"
         self.out = bytearray()
         self._line = bytearray()
@@ -57,6 +59,8 @@ class FakeRelayFirmware:
         """
         self.boot_count += 1
         self.cfg = replace(self.flash) if self.flash else replace(DEFAULTS)
+        self._stored_channel = self.cfg.channel
+        self._stored_group = self.cfg.group
         self.plane = "command"
         self._line.clear()
         self.out.clear()
@@ -80,6 +84,8 @@ class FakeRelayFirmware:
 
     def _save(self) -> None:
         self.flash = replace(self.cfg)
+        self.flash.channel = self._stored_channel
+        self.flash.group = self._stored_group
 
     # -- input -------------------------------------------------------------
     def feed(self, data: bytes) -> None:
@@ -103,6 +109,7 @@ class FakeRelayFirmware:
             self._emit_banner()
         elif line == b"?":
             self._print_config()
+            self._comment("caps: CGT")
         elif line == b"!MODE?":
             self._comment(f"mode: {c.mode}")
         elif line in (b"!MODE RAW250", b"!MODE RAW251"):
@@ -133,6 +140,7 @@ class FakeRelayFirmware:
             if not 0 <= channel <= 35:
                 self._comment("error: usage !C <ch 0-35>"); return
             c.channel, c.group = channel, 10       # !C forces group 10
+            self._stored_channel, self._stored_group = c.channel, c.group
             self._save()
             self._print_config()                   # !C calls printConfig()
         elif line.startswith((b"!CG ", b"!RC ")):
@@ -146,7 +154,17 @@ class FakeRelayFirmware:
             if not (0 <= channel <= 83 and 0 <= group <= 255):
                 self._comment("error: usage !CG <ch 0-83> <group 0-255>"); return
             c.channel, c.group = channel, group
+            self._stored_channel, self._stored_group = c.channel, c.group
             self._save(); self._print_config()
+        elif line.startswith(b"!CGT "):
+            try:
+                channel, group = (int(x) for x in line.split()[1:3])
+            except ValueError:
+                self._comment("error: usage !CGT <ch 0-83> <group 0-255>"); return
+            if not (0 <= channel <= 83 and 0 <= group <= 255):
+                self._comment("error: usage !CGT <ch 0-83> <group 0-255>"); return
+            c.channel, c.group = channel, group
+            self._print_config()
         elif line.startswith(b"!P "):
             try:
                 power = int(line[3:])
@@ -166,6 +184,7 @@ class FakeRelayFirmware:
         elif line == b"!HELP":
             self._comment("!C <ch>            set channel")
             self._comment("!CG <ch> <group>   set channel and group")
+            self._comment("!CGT <ch> <group>  transient tune; do not save to flash")
         else:
             self._comment("error: unknown command (try !HELP)")
 
