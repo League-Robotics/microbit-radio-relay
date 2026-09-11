@@ -77,10 +77,11 @@ class FakeRelayFirmware:
     def _comment(self, text: str) -> None:
         self.out += f"# {text}\r\n".encode()
 
-    def _print_config(self) -> None:
+    def _print_config(self, *, include_caps: bool = False) -> None:
         c = self.cfg
+        caps = " caps: CGT" if include_caps else ""
         self._comment(f"channel: {c.channel} group: {c.group} "
-                      f"mode: {c.mode} power: {c.power}")
+                      f"mode: {c.mode} power: {c.power}{caps}")
 
     def _save(self) -> None:
         self.flash = replace(self.cfg)
@@ -108,8 +109,7 @@ class FakeRelayFirmware:
         if line == b"HELLO":
             self._emit_banner()
         elif line == b"?":
-            self._print_config()
-            self._comment("caps: CGT")
+            self._print_config(include_caps=True)
         elif line == b"!MODE?":
             self._comment(f"mode: {c.mode}")
         elif line in (b"!MODE RAW250", b"!MODE RAW251"):

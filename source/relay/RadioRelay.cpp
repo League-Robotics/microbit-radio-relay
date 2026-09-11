@@ -862,10 +862,12 @@ namespace
         comment("HELLO              re-request device banner");
     }
 
-    void printConfig()
+    void printConfig(bool includeCaps = false)
     {
-        char out[80];
-        snprintf(out, sizeof(out), "channel: %d group: %d mode: %s power: %d",
+        char out[96];
+        snprintf(out, sizeof(out), includeCaps
+                 ? "channel: %d group: %d mode: %s power: %d caps: CGT"
+                 : "channel: %d group: %d mode: %s power: %d",
                  cfg.channel, cfg.group,
                  cfg.mode == MODE_MAKECODE ? "MAKECODE" : "RAW250", cfg.power);
         comment(out);
@@ -890,8 +892,7 @@ namespace
         // Queries -----------------------------------------------------------
         if (strcmp(line, "?") == 0)
         {
-            printConfig();
-            comment("caps: CGT");
+            printConfig(true);
             return false;
         }
         if (strcmp(line, "!MODE?") == 0)

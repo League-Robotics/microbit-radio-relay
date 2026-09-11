@@ -137,7 +137,8 @@ async def test_transient_tune_changes_live_radio_but_not_saved_pair(cfg, factory
 
     channel.write_nowait(b"?\n")
     await channel.drain()
-    caps = await reader.wait_for(re.compile(rb"#\s*caps:\s*CGT"), 0.5)
+    caps = await reader.wait_for(
+        re.compile(rb"#\s*channel:\s*47\s+group:\s*60.*caps:\s*CGT"), 0.5)
     assert caps, "query should advertise transient-tune support"
 
     board.reset()
