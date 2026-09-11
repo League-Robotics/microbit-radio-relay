@@ -715,9 +715,9 @@ namespace
     {
         cfg.channel = ch;
         cfg.group = 10;
+        applyRadioConfig();
         storedChannel = cfg.channel;
         storedGroup = cfg.group;
-        applyRadioConfig();
         updateDisplay();
         saveConfig();
     }
@@ -1034,9 +1034,9 @@ namespace
             {
                 cfg.channel = ch;
                 cfg.group = grp;
+                applyRadioConfig();
                 storedChannel = cfg.channel;
                 storedGroup = cfg.group;
-                applyRadioConfig();
                 saveConfig();
                 uBit.display.printChar('?');        // §3.2: !CG/!RC show '?'
                 printConfig();
