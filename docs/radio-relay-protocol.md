@@ -166,14 +166,16 @@ lines is unaffected when debug is on.
 
 | Query     | Response (relay -> host, `#`-prefixed)                  |
 | --------- | ------------------------------------------------------- |
-| `?`       | `# channel: <ch> group: <g> mode: <m> power: <p>` then `# caps: CGT` |
+| `?`       | one or more `#` lines: `# channel: <ch> group: <g> mode: <m> power: <p>` then `# caps: CGT` |
 | `!MODE?`  | `# mode: MAKECODE` or `# mode: RAW250`                  |
 | `!DEBUG?` | `# debug: ON` or `# debug: OFF` (debug build only)      |
 
 Query support matters because the host cannot otherwise see relay state. Even
 though config persists across resets (§2.1), after opening the port the host
-should read config back rather than assume. The `caps:` line lets a host feature-
-detect optional command-plane extensions such as transient retuning.
+should read config back rather than assume. `?` may emit multiple `#` lines; a
+host should parse the config line and then treat `caps:` as an extensible
+space-separated feature list, looking for tokens it understands (for example
+`CGT`) rather than exact-matching the whole line.
 
 ### 3.4 Boot announcement
 
