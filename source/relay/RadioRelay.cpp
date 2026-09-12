@@ -155,6 +155,8 @@ namespace
     };
 
     Config cfg;
+    int storedChannel = kDefaultChannel;
+    int storedGroup   = kDefaultGroup;
     volatile bool dataPlane = false;    // false = command plane, true = data plane
     volatile bool echoMode  = false;    // transponder: bounce every received msg back
     uint8_t txSeq = 0;                  // rolling §5 sequence number
@@ -199,8 +201,8 @@ namespace
         memset(&sc, 0, sizeof(sc));
         sc.magic   = kCfgMagic;
         sc.version = kCfgVersion;
-        sc.channel = (uint8_t)cfg.channel;
-        sc.group   = (uint8_t)cfg.group;
+        sc.channel = (uint8_t)storedChannel;
+        sc.group   = (uint8_t)storedGroup;
         sc.power   = (uint8_t)cfg.power;
         sc.mode    = (uint8_t)cfg.mode;
         sc.frag    = cfg.frag ? 1 : 0;
@@ -232,6 +234,8 @@ namespace
         if (sc.channel <= 83)
             cfg.channel = sc.channel;
         cfg.group = sc.group;               // full 0..255 range is valid
+        storedChannel = cfg.channel;
+        storedGroup = cfg.group;
         if (sc.power <= 7)
             cfg.power = sc.power;
         cfg.mode  = (sc.mode == MODE_RAW250) ? MODE_RAW250 : MODE_MAKECODE;
@@ -712,6 +716,8 @@ namespace
         cfg.channel = ch;
         cfg.group = 10;
         applyRadioConfig();
+        storedChannel = cfg.channel;
+        storedGroup = cfg.group;
         updateDisplay();
         saveConfig();
     }
@@ -836,6 +842,7 @@ namespace
         comment("micro:bit radio relay");
         comment("!C <ch>            set channel 0-35 (group 10)");
         comment("!CG <ch> <group>   set channel 0-83 and group 0-255");
+        comment("!CGT <ch> <group>  transient tune; do not save to flash");
         comment("!RC <ch> <group>   alias of !CG");
         comment("!P <0-7>           set transmit power");
         comment("!MODE MAKECODE     32-byte CODAL string framing");
@@ -850,15 +857,17 @@ namespace
 #endif
         comment("buttons A/B        channel down/up (group 10)");
         comment("buttons A+B        mode menu: 32/250, echo/tx, cancel");
-        comment("?                  show channel/group/mode/power");
+        comment("?                  show channel/group/mode/power and caps");
         comment("!MODE?             show mode");
         comment("HELLO              re-request device banner");
     }
 
-    void printConfig()
+    void printConfig(bool includeCaps = false)
     {
-        char out[80];
-        snprintf(out, sizeof(out), "channel: %d group: %d mode: %s power: %d",
+        char out[96];
+        snprintf(out, sizeof(out), includeCaps
+                 ? "channel: %d group: %d mode: %s power: %d caps: CGT"
+                 : "channel: %d group: %d mode: %s power: %d",
                  cfg.channel, cfg.group,
                  cfg.mode == MODE_MAKECODE ? "MAKECODE" : "RAW250", cfg.power);
         comment(out);
@@ -883,7 +892,7 @@ namespace
         // Queries -----------------------------------------------------------
         if (strcmp(line, "?") == 0)
         {
-            printConfig();
+            printConfig(true);
             return false;
         }
         if (strcmp(line, "!MODE?") == 0)
@@ -1027,6 +1036,8 @@ namespace
                 cfg.channel = ch;
                 cfg.group = grp;
                 applyRadioConfig();
+                storedChannel = cfg.channel;
+                storedGroup = cfg.group;
                 saveConfig();
                 uBit.display.printChar('?');        // §3.2: !CG/!RC show '?'
                 printConfig();
@@ -1034,6 +1045,25 @@ namespace
             else
             {
                 comment("error: usage !CG <ch 0-83> <group 0-255>");
+            }
+            return false;
+        }
+        if (startsWith(line, "!CGT "))
+        {
+            int ch = -1, grp = -1;
+            char extra = 0;
+            if (sscanf(line + 5, "%d %d %c", &ch, &grp, &extra) == 2 &&
+                ch >= 0 && ch <= 83 && grp >= 0 && grp <= 255)
+            {
+                cfg.channel = ch;
+                cfg.group = grp;
+                applyRadioConfig();
+                uBit.display.printChar('?');
+                printConfig();
+            }
+            else
+            {
+                comment("error: usage !CGT <ch 0-83> <group 0-255>");
             }
             return false;
         }
