@@ -179,3 +179,62 @@ async def test_a_real_request_over_a_real_socket_round_trips(cfg):
         assert json.loads(body)["channel"] == 55
     finally:
         await api.stop()
+
+
+# -- the boards --------------------------------------------------------------
+async def started_inventory(cfg, factory, scanner):
+    from mbrelay.inventory import TERMINAL, Inventory
+    from mbrelay.relay import RelayControl
+
+    control = RelayControl(cfg)
+    inventory = Inventory(cfg, scanner, prober=lambda r: control.probe(factory, r.port))
+    await inventory.start()
+    for _ in range(200):
+        if all(r.state in TERMINAL for r in inventory.records.values()):
+            break
+        await asyncio.sleep(0.02)
+    return inventory
+
+
+async def test_devices_lists_the_boards_this_host_serves(cfg, factory, scanner):
+    from relay_fixtures import UID_A, UID_B
+
+    inventory = await started_inventory(cfg, factory, scanner)
+    try:
+        registry = NameRegistry(cfg)
+        status, payload = route(registry, parse_head(b"GET /devices HTTP/1.1"), b"",
+                                inventory)
+        assert status == 200
+        assert {r["uid"] for r in payload["devices"]} == {UID_A, UID_B}
+        assert route(registry, parse_head(b"DELETE /devices HTTP/1.1"), b"",
+                     inventory)[0] == 405
+    finally:
+        await inventory.stop()
+
+
+async def test_fetch_devices_over_a_real_socket_and_an_old_daemon_is_named(
+        cfg, factory, scanner):
+    """The client end, against both a daemon that has the route and one that
+    predates it -- which is what the fleet looks like mid-upgrade."""
+    import dataclasses
+
+    from mbrelay.client import DevicesUnavailable, fetch_devices
+    from relay_fixtures import UID_A, UID_B
+
+    listening = dataclasses.replace(cfg, registry=dataclasses.replace(
+        cfg.registry, bind="127.0.0.1", port=0))
+    inventory = await started_inventory(cfg, factory, scanner)
+    new = HttpApi(type("D", (), {"cfg": listening, "registry": NameRegistry(listening),
+                                 "inventory": inventory})())
+    old = HttpApi(type("D", (), {"cfg": listening, "registry": NameRegistry(listening)})())
+    await new.start()
+    await old.start()
+    try:
+        rows = await asyncio.to_thread(fetch_devices, "127.0.0.1", new.port)
+        assert {r["uid"] for r in rows} == {UID_A, UID_B}
+        with pytest.raises(DevicesUnavailable, match="predates GET /devices"):
+            await asyncio.to_thread(fetch_devices, "127.0.0.1", old.port)
+    finally:
+        await new.stop()
+        await old.stop()
+        await inventory.stop()

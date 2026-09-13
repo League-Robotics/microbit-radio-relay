@@ -349,6 +349,14 @@ class Inventory:
                 return rec
         return None
 
+    def listing(self, show_all: bool = False) -> list[dict]:
+        """Every board as a JSON row, departed ones only on request. One copy,
+        because `mbrelay devices` on the box and GET /devices off it must agree."""
+        rows = [r.to_json() for r in self.records.values()
+                if show_all or r.state is not DeviceState.GONE]
+        rows.sort(key=lambda r: (r["state"], r["name"]))
+        return rows
+
     def counts(self) -> dict[str, int]:
         # "busy" and "releasing" are reported separately: a board being handed
         # back is not held by anybody, and lumping the two together made the

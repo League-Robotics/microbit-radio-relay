@@ -72,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, help_text in (("devices", "list attached relays"), ("list", None)):
         d = sub.add_parser(name, help=help_text)
+        d.add_argument("hosts", nargs="*", metavar="HOST",
+                       help="list the boards on these relay hosts instead, over "
+                            "their HTTP API")
+        d.add_argument("--remote", action="store_true",
+                       help="list the boards on every relay host found on the LAN")
+        d.add_argument("--discover-timeout", type=float, default=1.5, metavar="SECONDS")
         d.add_argument("--refresh", action="store_true",
                        help="re-probe idle boards (never touches a busy one)")
         d.add_argument("--all", action="store_true", help="include departed boards")
@@ -242,6 +248,8 @@ def cmd_serve(args) -> int:
 
 def cmd_devices(args) -> int:
     cfg = _config(args)
+    if args.remote or args.hosts:
+        return _remote_devices(args, cfg)
     try:
         with _client(args) as client:
             if args.refresh:
@@ -253,7 +261,9 @@ def cmd_devices(args) -> int:
         # Work without the daemon, so you can see the hardware before starting it.
         rows = _local_scan(cfg)
         if not args.json:
-            print("(daemon not running -- showing a direct USB scan)", file=sys.stderr)
+            print("(daemon not running -- showing a direct USB scan; "
+                  "'mbrelay devices --remote' lists the boards on relay hosts)",
+                  file=sys.stderr)
     except AdminError as exc:
         print(f"mbrelay: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -279,6 +289,80 @@ def _local_scan(cfg) -> list[dict]:
              "short_uid": uid[16:24],
              "name": labels.get(uid) or uid[16:24], "role": "", "session": None}
             for uid, info in sorted(scan_ports().items())]
+
+
+def _remote_devices(args, cfg) -> int:
+    """`devices --remote` / `devices HOST`: the boards on other machines.
+
+    Read from each host's HTTP API, because the admin socket that answers a
+    plain `mbrelay devices` never leaves the box it is on, and the pool port
+    would take a board away from whoever wanted it just to look.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .client import DevicesUnavailable, fetch_devices, parse_target
+
+    if args.hosts:
+        try:
+            hosts = [(text, *parse_target(text, cfg.registry.port), "")
+                     for text in args.hosts]
+        except ValueError as exc:
+            print(f"mbrelay: bad host: {exc}", file=sys.stderr)
+            return EXIT_USAGE
+    else:
+        from .mdns import browse_detailed
+        result = browse_detailed(cfg.mdns.service, args.discover_timeout)
+        if not result.services:
+            print(f"mbrelay: {result.problem}", file=sys.stderr)
+            return EXIT_OK
+        hosts = [(s.instance, s.address, _registry_port(s, cfg), s.version)
+                 for s in result.services]
+
+    def ask(host) -> tuple[list[dict] | None, str]:
+        _, address, port, _ = host
+        try:
+            return fetch_devices(address, port), ""
+        except DevicesUnavailable as exc:
+            return None, str(exc)
+
+    # Concurrently, so one host that is down costs its timeout once, not per host.
+    with ThreadPoolExecutor(max_workers=len(hosts)) as pool:
+        answers = list(pool.map(ask, hosts))
+    answered = any(devices is not None for devices, _ in answers)
+
+    if args.json:
+        _emit(args, {"hosts": [
+            {"name": name, "address": address, "port": port, "version": version,
+             "devices": devices or [], "problem": problem}
+            for (name, address, port, version), (devices, problem)
+            in zip(hosts, answers)]})
+        return EXIT_OK if answered else EXIT_ERROR
+
+    rows = []
+    for (name, _, _, version), (devices, problem) in zip(hosts, answers):
+        if devices is None:
+            # Said, not skipped: a silent gap reads as "that host has no boards".
+            running = f" (mbrelay {version})" if version else ""
+            print(f"mbrelay: {name}{running}: {problem}", file=sys.stderr)
+            continue
+        rows += [[name, r.get("name", "?"), r.get("state", "?"), r.get("role") or "-",
+                  r.get("session") or "-", r.get("short_uid") or r["uid"][16:24]]
+                 for r in devices]
+    if not answered:
+        return EXIT_ERROR
+    if not rows:
+        print("no micro:bits found")
+        return EXIT_OK
+    print(_table(rows, ["HOST", "NAME", "STATE", "ROLE", "SESSION", "UID"]))
+    return EXIT_OK
+
+
+def _registry_port(service, cfg) -> int:
+    """The HTTP port a discovered host advertised (TXT ``registry=``), else ours."""
+    try:
+        return int(service.txt.get("registry", ""))
+    except ValueError:
+        return cfg.registry.port
 
 
 def cmd_status(args) -> int:

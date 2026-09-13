@@ -189,6 +189,25 @@ existed. **A typed target skips discovery entirely** — no browse, no delay. Us
 That is the difference between "advertised" and "actually serving": a node whose
 daemon is crash-looping still looks perfect in a plain browse.
 
+To see the **boards** rather than the hosts, ask for them remotely:
+
+```
+$ mbrelay devices --remote
+HOST     NAME   STATE  ROLE         SESSION  UID
+-------  -----  -----  -----------  -------  --------
+torture  gozop  busy   RADIOBRIDGE  s-804    4f02a351
+torture  getez  free   RADIOBRIDGE  -        17449eac
+vali     zavaz  free   RADIOBRIDGE  -        c0a7e11d
+
+$ mbrelay devices torture       # one host, named; skips discovery
+```
+
+That browses the LAN the same way, then reads each host's `GET /devices` on its
+HTTP port (the `registry=` TXT key, else `registry.port`). It never touches the
+pool port, so listing takes no board away from anyone. A host that does not
+answer is reported on stderr and the rest are still listed; a host running a
+daemon older than `GET /devices` is named as needing an upgrade.
+
 The browser is stdlib — no `zeroconf`, no D-Bus, no new dependency. It binds an
 **ephemeral** UDP port rather than 5353, which under RFC 6762 §6.7 obliges every
 responder to answer by unicast straight back to it; that sidesteps the port
@@ -233,6 +252,7 @@ GET    /names            every association, and who shares a link
 GET    /names/<name>     where that robot is; creates the record on a miss
 PUT    /names/<name>     {"channel": 12, "group": 4}
 DELETE /names/<name>     back to the derived address
+GET    /devices          the boards this host serves, as `mbrelay devices` shows them
 GET    /status           version and counts
 ```
 
@@ -301,6 +321,7 @@ it went.
 ```bash
 mbrelay serve                  # foreground; systemd-friendly, SIGTERM drains cleanly
 mbrelay devices                # what is attached and what state it is in
+mbrelay devices --remote       # the boards on every relay host on the LAN
 mbrelay status --watch         # live sessions
 mbrelay sessions
 mbrelay kick s-3               # boot a session off a board
@@ -314,7 +335,8 @@ mbrelay config show            # merged config, and where each value came from
 
 `mbrelay devices` works **without** the daemon running — it falls back to a
 direct USB scan, which is exactly what you want when you are trying to work out
-why the daemon sees nothing.
+why the daemon sees nothing. For boards on another machine, use
+`mbrelay devices --remote` or `mbrelay devices <host>`.
 
 Exit codes are stable, so scripts can branch on them: `0` ok, `1` error, `2`
 usage, `3` daemon not running, `4` device not found, `5` no free device, `6`

@@ -19,6 +19,7 @@ curl some-host:8761/names          # where each robot is (the name registry)
 
 ```bash
 mbrelay devices                    # what is attached, and what state it is in
+mbrelay devices --remote           # the boards on every relay host on the LAN
 mbrelay status                     # daemon health and live sessions
 mbrelay discover                   # relay hosts advertising themselves on the LAN
 mbrelay connect                    # a terminal on a relay, host found by itself

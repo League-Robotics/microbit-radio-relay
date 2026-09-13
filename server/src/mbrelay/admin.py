@@ -59,11 +59,7 @@ def _status(daemon, args):
 
 @handler("list")
 def _list(daemon, args):
-    show_all = bool(args.get("all"))
-    rows = [r.to_json() for r in daemon.inventory.records.values()
-            if show_all or r.state is not DeviceState.GONE]
-    rows.sort(key=lambda r: (r["state"], r["name"]))
-    return {"devices": rows}
+    return {"devices": daemon.inventory.listing(show_all=bool(args.get("all")))}
 
 
 @handler("sessions")

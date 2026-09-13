@@ -12,7 +12,7 @@ Why hand-written, when every language has a web framework: this package has
 exactly one dependency (pyserial), which is what lets a fleet node install with
 ``apt install python3-serial && pip install --break-system-packages <wheel>``.
 That constraint produced the stdlib mDNS codec in ``mdns.py`` and it produces
-this. Five routes do not justify a dependency, so the scope is kept honest:
+this. Six routes do not justify a dependency, so the scope is kept honest:
 
 * one request per connection -- ``Connection: close``, always, so there is no
   keep-alive state machine and no pipelining to get wrong;
@@ -112,7 +112,8 @@ def render(status: int, payload: dict) -> bytes:
     return head + body
 
 
-def route(registry, request: Request, body: bytes) -> tuple[int, dict]:
+def route(registry, request: Request, body: bytes,
+          inventory=None) -> tuple[int, dict]:
     """The whole API. Returns (status, payload); never raises for a bad
     request, because a 400 with a message is more useful than a stack trace in
     the daemon's log."""
@@ -120,6 +121,12 @@ def route(registry, request: Request, body: bytes) -> tuple[int, dict]:
     try:
         if path == "/status":
             return _require(request, "GET") or (200, _status(registry))
+        if path == "/devices" and inventory is not None:
+            # Read-only, and the same rows `mbrelay devices` prints on the box:
+            # the admin socket that serves them there never leaves this machine,
+            # so without this nobody elsewhere can see what the pool holds.
+            return _require(request, "GET") or (
+                200, {"version": __version__, "devices": inventory.listing()})
         if path == "/names":
             return _require(request, "GET") or (200, registry.listing())
         if path.startswith("/names/"):
@@ -256,4 +263,5 @@ class HttpApi:
             return exc.status, _error("bad_request", str(exc))
         except asyncio.IncompleteReadError:
             return 400, _error("bad_request", "body shorter than Content-Length")
-        return route(self.daemon.registry, request, body)
+        return route(self.daemon.registry, request, body,
+                     getattr(self.daemon, "inventory", None))

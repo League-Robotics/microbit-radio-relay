@@ -230,6 +230,36 @@ class RegistryUnreachable(RobotResolveError):
         super().__init__(detail)
 
 
+class DevicesUnavailable(Exception):
+    """A relay host did not hand over its board list."""
+
+
+def fetch_devices(host: str, port: int = 8761, timeout: float = 3.0) -> list[dict]:
+    """The boards a relay host is serving, from its HTTP API.
+
+    The HTTP port rather than the admin socket because the socket is
+    deliberately unreachable from off-box, and rather than the pool port because
+    connecting there takes a board away from whoever wanted it.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    url = f"http://{host}:{port}/devices"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:
+            return list(json.loads(response.read())["devices"])
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            # The one failure with a known fix, so it gets said plainly.
+            raise DevicesUnavailable(
+                f"{url}: not found -- that daemon predates GET /devices; "
+                f"upgrade mbrelay there") from None
+        raise DevicesUnavailable(f"{url}: {exc}") from None
+    except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise DevicesUnavailable(f"{url}: {exc}") from None
+
+
 _BANNER_RE = re.compile(rb"DEVICE:\w+:relay:([^:\r\n]+):")
 _REPLY_RE = re.compile(rb"#\s*(?:channel:|error:)[^\r\n]*\r?\n")
 _TUNED_RE = re.compile(rb"#\s*channel:\s*(\d+)\s+group:\s*(\d+)")

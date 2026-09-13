@@ -21,7 +21,8 @@ def test_every_documented_subcommand_parses():
     for argv in (["serve"], ["devices"], ["list"], ["status"], ["sessions"],
                  ["kick", "s-1"], ["reset", "vevov"], ["disable", "x"], ["enable", "x"],
                  ["rescan"], ["events"], ["ping"], ["flash", "--all-relays"],
-                 ["connect"], ["discover"], ["config", "show"], ["install-unit"]):
+                 ["connect"], ["discover"], ["config", "show"], ["install-unit"],
+                 ["devices", "--remote"], ["devices", "torture"], ["list", "--remote"]):
         assert parser.parse_args(argv).func is not None
 
 
@@ -273,6 +274,80 @@ def test_discover_json_carries_the_source_address_it_queried_from(monkeypatch, c
     assert payload["source"] == "192.168.1.40"
     assert payload["hosts"][0]["name"] == "torture"
     assert payload["hosts"][0]["port"] == 8760
+
+
+# -- devices on other hosts -------------------------------------------------
+def board(name, state="free", session=None):
+    return {"uid": "9906360200052820abababab" + "0" * 24, "name": name, "state": state,
+            "role": "RADIOBRIDGE", "session": session, "short_uid": "abababab"}
+
+
+def test_devices_remote_lists_the_boards_on_every_host_it_found(monkeypatch, capsys):
+    from mbrelay.mdns import Service
+    vali = Service(instance="vali", hostname="vali.local", addresses=("192.0.2.151",),
+                   port=8760, txt={"version": "x", "registry": "9000"})
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed", found(host(), vali))
+    boards = {"192.0.2.12": [board("gozop", "busy", "s-804"), board("getez")],
+              "192.0.2.151": [board("zavaz")]}
+    asked = []
+
+    def fetch(address, port, timeout=3.0):
+        asked.append((address, port))
+        return boards[address]
+
+    monkeypatch.setattr("mbrelay.client.fetch_devices", fetch)
+    assert main(["devices", "--remote"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert [line.split()[:2] for line in out.splitlines()[2:]] == [
+        ["torture", "gozop"], ["torture", "getez"], ["vali", "zavaz"]]
+    assert "s-804" in out
+    # The HTTP port -- advertised, else the default -- never the pool port:
+    # looking must not take a board away from anyone.
+    assert sorted(asked) == [("192.0.2.12", 8761), ("192.0.2.151", 9000)]
+
+
+def test_devices_remote_names_a_host_that_did_not_answer_and_lists_the_rest(
+        monkeypatch, capsys):
+    from mbrelay.client import DevicesUnavailable
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed",
+                        found(host(), host("vali", "192.0.2.151")))
+
+    def fetch(address, port, timeout=3.0):
+        if address == "192.0.2.151":
+            raise DevicesUnavailable("not found -- that daemon predates GET /devices")
+        return [board("getez")]
+
+    monkeypatch.setattr("mbrelay.client.fetch_devices", fetch)
+    assert main(["devices", "--remote"]) == EXIT_OK
+    captured = capsys.readouterr()
+    assert "getez" in captured.out and "vali" not in captured.out
+    assert "vali (mbrelay 0.20260826.9)" in captured.err
+    assert "predates GET /devices" in captured.err
+
+
+def test_devices_remote_is_an_error_when_no_host_answers(monkeypatch):
+    from mbrelay.client import DevicesUnavailable
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed", found(host()))
+
+    def fetch(address, port, timeout=3.0):
+        raise DevicesUnavailable("connection refused")
+
+    monkeypatch.setattr("mbrelay.client.fetch_devices", fetch)
+    assert main(["devices", "--remote"]) == EXIT_ERROR
+
+
+def test_devices_for_a_named_host_skips_discovery(monkeypatch, capsys):
+    def no_browse(*args, **kwargs):
+        raise AssertionError("a named host must not browse")
+
+    monkeypatch.setattr("mbrelay.mdns.browse_detailed", no_browse)
+    asked = []
+    monkeypatch.setattr("mbrelay.client.fetch_devices",
+                        lambda address, port, timeout=3.0:
+                        asked.append((address, port)) or [board("getez")])
+    assert main(["devices", "torture"]) == EXIT_OK
+    assert asked == [("torture", 8761)]
+    assert "getez" in capsys.readouterr().out
 
 
 def test_connect_with_no_target_uses_the_one_host_it_found(monkeypatch, dialled,
