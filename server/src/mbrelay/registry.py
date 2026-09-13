@@ -3,9 +3,9 @@
 A micro:bit's five-letter name is its ``DEVICEID[1]`` in base 5, so
 ``mbrelay.naming`` turns any name into a ``(channel, group)`` with no
 coordination at all. That is a wonderful property and it is not enough: the
-mapping has 3125 names but only 25 channels, so 125 names share each one, and
-when two robots collide there is nothing to be done about it -- the address is
-a property of the silicon.
+mapping spreads 3125 names over 73 channels, so about 43 names share each one,
+and when two robots collide there is nothing to be done about it -- the address
+is a property of the silicon.
 
 So the derived pair is a **default**, and this is the thing that can override
 it. Three layers, highest first::
@@ -20,10 +20,18 @@ the list of every robot this relay knows about. Only a *malformed* name is an
 error -- the spec is explicit that refusing an unknown-but-well-formed name
 breaks the tune-to-whatever-I-name model that makes the whole thing usable.
 
-**Collisions are reported, not refused.** Two names may hold one pair; a survey
-is allowed to make a mess halfway through, and an operator moving robots by
-hand needs to see the clash rather than be stopped by it. That is the same
-posture the daemon already takes for two sessions sharing a channel.
+**Collisions are reported, not refused**, at two severities:
+
+* a **conflict** (error) -- two names on one ``(channel, group)``. Each robot
+  receives the other's packets and acts on the other's commands. Fix it.
+* a **channel conflict** (warning) -- two names on one channel in different
+  groups. The group byte makes each ignore the other's packets, but they still
+  share the air, so their transmissions collide whenever both are running.
+
+Neither is refused: a survey is allowed to make a mess halfway through, and an
+operator moving robots by hand needs to see the clash rather than be stopped by
+it. That is the same posture the daemon already takes for two sessions sharing
+a channel.
 
 **No security, deliberately.** This is an internal service on a lab LAN; see
 ``httpapi.py``.
@@ -136,16 +144,28 @@ class NameRegistry:
             data = json.loads(self.path.read_text())
         except (OSError, ValueError):
             return
+        rederived = 0
         for name, entry in (data.get("names") or {}).items():
             try:
+                name = validate_name(name)
                 channel, group = validate_pair(int(entry["channel"]), int(entry["group"]))
-                self._learned[validate_name(name)] = (
-                    channel, group, bool(entry.get("explicit")),
-                    float(entry.get("updated") or 0.0))
+                explicit = bool(entry.get("explicit"))
+                if not explicit and (channel, group) != naming.name_to_radio(name):
+                    # A derived row caches the mapping; it is not a decision
+                    # anyone made. When the mapping changes, trusting the stored
+                    # pair would keep every robot on its OLD default and report
+                    # it as "derived" while no longer being so.
+                    channel, group = naming.name_to_radio(name)
+                    rederived += 1
+                self._learned[name] = (channel, group, explicit,
+                                       float(entry.get("updated") or 0.0))
             except (KeyError, TypeError, ValueError, RegistryError):
                 # A hand-edited or half-written file must not stop the daemon
                 # serving boards; the bad row is dropped and re-derived.
                 log.warning("registry: ignoring unusable entry name=%r", name)
+        if rederived:
+            log.info("registry re-derived entries=%d (the name mapping changed)", rederived)
+            self.save()
         log.debug("registry loaded entries=%d path=%s", len(self._learned), self.path)
 
     def save(self) -> None:
@@ -223,24 +243,65 @@ class NameRegistry:
         conflicts only on the HTTP path and `mbrelay names` quietly showed every
         clash as "-".
         """
-        conflicts = self.conflicts()
-        rows = []
-        for entry in self.all():
-            row = entry.to_json()
-            clash = conflicts.get((entry.channel, entry.group))
-            if clash:
-                row["conflict"] = [n for n in clash if n != entry.name]
-            rows.append(row)
-        return {"names": rows,
+        everyone = self.all()
+        return {"names": [self._annotate(entry, everyone) for entry in everyone],
                 "conflicts": [{"channel": ch, "group": grp, "names": names}
-                              for (ch, grp), names in sorted(conflicts.items())]}
+                              for (ch, grp), names in
+                              sorted(self._conflicts(everyone).items())],
+                "channel_conflicts": [{"channel": ch, "names": names}
+                                      for ch, names in
+                                      sorted(self._channel_conflicts(everyone).items())]}
+
+    def annotate(self, entry: Entry) -> dict:
+        """One row as the listing shows it, for callers that asked about one
+        robot -- `mbrelay connect` has to be able to warn without fetching
+        the whole registry."""
+        return self._annotate(entry, self.all())
+
+    @staticmethod
+    def _annotate(entry: Entry, everyone: list[Entry]) -> dict:
+        """``conflict`` names the robots on this exact link (an error),
+        ``channel_conflict`` those on this channel in another group (a
+        warning). Each key is present only when it has something to say."""
+        row = entry.to_json()
+        others = [e for e in everyone
+                  if e.channel == entry.channel and e.name != entry.name]
+        if same_link := [e.name for e in others if e.group == entry.group]:
+            row["conflict"] = same_link
+        if same_channel := [e.name for e in others if e.group != entry.group]:
+            row["channel_conflict"] = same_channel
+        return row
 
     def conflicts(self) -> dict[tuple[int, int], list[str]]:
-        """Pairs held by more than one name. Reported, never enforced."""
+        """Pairs held by more than one name -- an error. Reported, never
+        enforced."""
+        return self._conflicts(self.all())
+
+    def channel_conflicts(self) -> dict[int, list[str]]:
+        """Channels holding names in more than one group -- a warning.
+
+        Different groups filter each other's packets, but a group is only an
+        address byte: both robots still transmit on one frequency and collide.
+        A channel whose robots all share one group is a `conflicts()` error
+        instead, not this, so one clash is never reported twice.
+        """
+        return self._channel_conflicts(self.all())
+
+    @staticmethod
+    def _conflicts(everyone: list[Entry]) -> dict[tuple[int, int], list[str]]:
         seen: dict[tuple[int, int], list[str]] = {}
-        for entry in self.all():
+        for entry in everyone:
             seen.setdefault((entry.channel, entry.group), []).append(entry.name)
         return {pair: names for pair, names in seen.items() if len(names) > 1}
+
+    @staticmethod
+    def _channel_conflicts(everyone: list[Entry]) -> dict[int, list[str]]:
+        names: dict[int, list[str]] = {}
+        groups: dict[int, set[int]] = {}
+        for entry in everyone:
+            names.setdefault(entry.channel, []).append(entry.name)
+            groups.setdefault(entry.channel, set()).add(entry.group)
+        return {ch: names[ch] for ch in names if len(groups[ch]) > 1}
 
     # -- assignment --------------------------------------------------------
     def set(self, name: str, channel: int, group: int) -> Entry:

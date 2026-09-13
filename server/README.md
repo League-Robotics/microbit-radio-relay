@@ -27,7 +27,7 @@ mbrelay connect host:8760          # or name it, which skips discovery entirely
 mbrelay connect tovez              # a terminal on the ROBOT tovez, wherever it is
 mbrelay names                      # the name registry: where each robot is
 mbrelay names set tovez 12/4       # move a robot off its derived channel
-mbrelay flash --all-relays         # reflash every board (needs mbdeploy)
+mbrelay flash --all-relays         # reflash every board from the latest release (needs mbdeploy)
 mbrelay kick s-3                   # boot a session off a board
 mbrelay reset vevov                # force one board back to defaults
 ```

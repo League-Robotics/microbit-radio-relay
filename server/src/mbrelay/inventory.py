@@ -28,6 +28,15 @@ log = logging.getLogger(__name__)
 # decimal, the older RADIORELAY in hex. See docs/announce.md.
 BANNER_RE = re.compile(rb"DEVICE:(RADIOBRIDGE|RADIORELAY):relay:([^:]+):([0-9A-Fa-f]+)")
 
+# Any micro:bit's identity, in either dialect on this bench. BANNER_RE above is
+# the relay-only form that acquire insists on; this is what a probe accepts, so
+# a robot plugged into a relay host is named rather than written off as blank:
+#   DEVICE:RADIOBRIDGE:relay:getez:1784514240     relay firmware, and boot lines
+#   device NEZHA2 robot tovez 2314287040          the robot firmware's HELLO reply
+IDENTITY_RE = re.compile(
+    rb"DEVICE:(?P<role>\w+):(?P<common>[^:\s]+):(?P<name>[^:\s]+):(?P<serial>[0-9A-Fa-f]+)"
+    rb"|\bdevice (?P<role_r>\w+) (?P<common_r>\S+) (?P<name_r>\S+) (?P<serial_r>[0-9A-Fa-f]+)")
+
 
 class DeviceState(StrEnum):
     UNKNOWN = "unknown"          # on USB, never probed
@@ -37,7 +46,7 @@ class DeviceState(StrEnum):
     BUSY = "busy"
     RELEASING = "releasing"
     NO_FIRMWARE = "no_firmware"  # probed, no banner came back
-    FOREIGN = "foreign"          # answered, but not a role we can drive
+    FOREIGN = "foreign"          # answered, but not a role we pool (a robot, the old relay)
     DISABLED = "disabled"        # deny-list, or an operator disabled it
     ERROR = "error"              # open/probe/release failed; backoff applies
     GONE = "gone"                # was known, now absent from USB
@@ -63,6 +72,8 @@ class DeviceRecord:
     role: str = ""
     device_name: str = ""        # CODAL friendly name from the banner, e.g. "getez"
     nrf_serial: str = ""
+    firmware: str = ""           # firmware build, from !VER? or VER; "" if it cannot say
+    firmware_asked: bool = False  # a probe that asks for the version has seen this board
     banner_raw: bytes = b""
     label: str = ""              # operator-assigned name from [devices.labels]
     first_seen: float = field(default_factory=time.time)
@@ -104,7 +115,8 @@ class DeviceRecord:
         return {
             "uid": self.uid, "port": self.port, "state": str(self.state),
             "name": self.name, "role": self.role, "device_name": self.device_name,
-            "nrf_serial": self.nrf_serial, "label": self.label,
+            "nrf_serial": self.nrf_serial, "firmware": self.firmware,
+            "firmware_asked": self.firmware_asked, "label": self.label,
             "short_uid": self.short_uid,
             "first_seen": round(self.first_seen, 3), "last_seen": round(self.last_seen, 3),
             "last_probe": round(self.last_probe, 3), "session": self.session_id,
@@ -114,8 +126,8 @@ class DeviceRecord:
         }
 
     # Only identity is cached; volatile state is always rediscovered at startup.
-    _CACHED = ("role", "device_name", "nrf_serial", "label", "first_seen",
-               "last_probe", "sessions_total")
+    _CACHED = ("role", "device_name", "nrf_serial", "firmware", "firmware_asked", "label",
+               "first_seen", "last_probe", "sessions_total")
 
     def cache_entry(self) -> dict:
         return {k: getattr(self, k) for k in self._CACHED}
@@ -124,6 +136,16 @@ class DeviceRecord:
         for key in self._CACHED:
             if key in data:
                 setattr(self, key, data[key])
+
+
+def apply_banner(rec: DeviceRecord, banner, allow_roles) -> None:
+    """What a probe learned, onto the record. Shared by the daemon's inventory
+    and by `mbrelay devices` without a daemon, so both describe a board alike."""
+    rec.role, rec.device_name = banner.role, banner.device_name
+    rec.nrf_serial, rec.banner_raw = banner.serial, banner.raw
+    rec.firmware = getattr(banner, "firmware", "")
+    rec.firmware_asked = True
+    rec.state = DeviceState.FREE if rec.role in allow_roles else DeviceState.FOREIGN
 
 
 class Inventory:
@@ -246,9 +268,10 @@ class Inventory:
             rec.state = DeviceState.DISABLED
             rec.disabled_reason = rec.disabled_reason or "deny list"
             return
-        if rec.role and rec.device_name:
+        if rec.role and rec.device_name and rec.firmware_asked:
             # Cached identity is enough. Do not reboot a board to learn what we
-            # already know.
+            # already know. A record cached before probes asked for the firmware
+            # version is NOT enough: it would show a blank firmware forever.
             rec.state = (DeviceState.FREE if rec.role in self.cfg.devices.allow_roles
                          else DeviceState.FOREIGN)
             return
@@ -296,14 +319,9 @@ class Inventory:
                 self.note_error(rec)
                 log.info("device_probed uid=%s result=no_firmware port=%s", rec.uid, rec.port)
                 return
-            rec.role, rec.device_name = banner.role, banner.device_name
-            rec.nrf_serial, rec.banner_raw = banner.serial, banner.raw
+            apply_banner(rec, banner, self.cfg.devices.allow_roles)
             rec.error_count = 0
             rec.next_retry_at = 0.0
-            if rec.role in self.cfg.devices.allow_roles:
-                rec.state = DeviceState.FREE
-            else:
-                rec.state = DeviceState.FOREIGN
             log.info("device_probed uid=%s name=%s role=%s state=%s port=%s",
                      rec.uid, rec.device_name, rec.role, rec.state, rec.port)
             self.save_cache()
@@ -385,7 +403,8 @@ class Inventory:
             if rec.state in IN_USE or rec.port is None:
                 continue             # never disturb a board in use
             if force:
-                rec.role = rec.device_name = ""
+                rec.role = rec.device_name = rec.firmware = ""
+                rec.firmware_asked = False
                 rec.error_count = 0
                 rec.next_retry_at = 0.0
             self._classify_or_probe(rec)

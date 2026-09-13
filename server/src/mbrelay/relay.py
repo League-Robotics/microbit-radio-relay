@@ -18,10 +18,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from .errors import RelayError
-from .inventory import BANNER_RE
+from .inventory import BANNER_RE, IDENTITY_RE
 from .transport import ByteChannel
 
 log = logging.getLogger(__name__)
@@ -54,6 +54,16 @@ NORMALIZE = b"".join(cmd for cmd, _ in NORMALIZE_STEPS)
 #: What ``?`` must report once the steps above have been applied.
 DEFAULT_CFG = (0, 10, b"RAW250", 7)
 
+#: The reply to ``!VER?`` -- or the refusal of firmware that predates it, so an
+#: old board answers in one round trip instead of costing the whole timeout.
+VERSION_RE = re.compile(rb"#\s*(?:version:\s*(\S+)|error: unknown command)")
+#: The robot firmware's reply to ``VER`` (pxt-nezha-diffdrive wire_handler.cpp).
+ROBOT_VERSION_RE = re.compile(rb"(?m)^ver (\S+)")
+
+#: Roles whose firmware is a relay. Anything else that answers is asked ``VER``,
+#: the robot firmware's version query.
+RELAY_ROLES = ("RADIOBRIDGE", "RADIORELAY")
+
 
 @dataclass(frozen=True)
 class BannerInfo:
@@ -61,14 +71,18 @@ class BannerInfo:
     device_name: str
     serial: str
     raw: bytes
+    firmware: str = ""          # from !VER? or VER; "" when the firmware cannot say
 
     @classmethod
     def parse(cls, data: bytes) -> "BannerInfo | None":
-        m = BANNER_RE.search(data)
+        m = IDENTITY_RE.search(data)
         if not m:
             return None
-        return cls(role=m.group(1).decode(), device_name=m.group(2).decode(errors="replace"),
-                   serial=m.group(3).decode(), raw=m.group(0))
+        role = m.group("role") or m.group("role_r")
+        name = m.group("name") or m.group("name_r")
+        serial = m.group("serial") or m.group("serial_r")
+        return cls(role=role.decode(), device_name=name.decode(errors="replace"),
+                   serial=serial.decode(), raw=m.group(0))
 
 
 class Reader:
@@ -140,8 +154,11 @@ class RelayControl:
         self.break_settle = s.break_settle_ms / 1000
 
     async def hello(self, channel: ByteChannel, reader: Reader,
-                    allow_break: bool = True) -> BannerInfo:
+                    allow_break: bool = True, pattern: re.Pattern = BANNER_RE) -> BannerInfo:
         """Confirm we are in the command plane, and learn which board this is.
+
+        ``pattern`` is the relay banner for acquire, which can only drive a
+        relay; a probe passes IDENTITY_RE so any board that answers is named.
 
         The boot banner went out while we were still opening the port, so ask
         again. Several attempts, because a board still running its boot animation
@@ -160,7 +177,7 @@ class RelayControl:
         it the release guarantee simply does not hold on the platform the fleet
         actually runs.
         """
-        if info := await self._ask_hello(channel, reader):
+        if info := await self._ask_hello(channel, reader, pattern):
             return info
 
         if allow_break:
@@ -173,7 +190,7 @@ class RelayControl:
             else:
                 await asyncio.sleep(self.break_settle)
                 reader.clear()
-                if info := await self._ask_hello(channel, reader):
+                if info := await self._ask_hello(channel, reader, pattern):
                     log.info("break recovered the board")
                     return info
 
@@ -182,11 +199,11 @@ class RelayControl:
                          f"{' and a break' if allow_break else ''} -- "
                          "board may not be running relay firmware")
 
-    async def _ask_hello(self, channel: ByteChannel,
-                         reader: Reader) -> "BannerInfo | None":
+    async def _ask_hello(self, channel: ByteChannel, reader: Reader,
+                         pattern: re.Pattern = BANNER_RE) -> "BannerInfo | None":
         for attempt in range(self.hello_attempts):
             channel.write_nowait(b"HELLO\n")
-            match = await reader.wait_for(BANNER_RE, self.hello_timeout)
+            match = await reader.wait_for(pattern, self.hello_timeout)
             if match:
                 info = BannerInfo.parse(match.group(0))
                 if info is not None:
@@ -224,6 +241,26 @@ class RelayControl:
             await asyncio.sleep(0.4)
         raise RelayError("board did not confirm factory defaults after normalize; "
                          f"last output: {bytes(reader.buf)[-160:]!r}")
+
+    async def firmware_version(self, channel: ByteChannel, reader: Reader,
+                               timeout: float = 1.0) -> str:
+        """The relay firmware's build version, or "" for firmware older than
+        ``!VER?`` -- which answers ``# error: unknown command`` and is otherwise
+        perfectly serviceable, so this is never a reason to refuse a board."""
+        reader.clear()
+        channel.write_nowait(b"!VER?\n")
+        match = await reader.wait_for(VERSION_RE, timeout)
+        return match.group(1).decode(errors="replace") if match and match.group(1) else ""
+
+    async def robot_version(self, channel: ByteChannel, reader: Reader,
+                            timeout: float = 1.0) -> str:
+        """A robot's firmware version, from its ``VER`` (``ver <version>``), or
+        "" when nothing answers -- a board we cannot name the build of is still
+        a board we can name."""
+        reader.clear()
+        channel.write_nowait(b"VER\n")
+        match = await reader.wait_for(ROBOT_VERSION_RE, timeout)
+        return match.group(1).decode(errors="replace") if match else ""
 
     async def query(self, channel: ByteChannel, reader: Reader,
                     timeout: float = 3.0) -> "re.Match[bytes] | None":
@@ -268,18 +305,24 @@ class RelayControl:
             await channel.close()
 
     async def probe(self, factory, port: str) -> BannerInfo | None:
-        """Identify a board. Returns None if nothing answers -- not an error.
+        """Identify a board: its name, role and firmware version, whatever it runs.
 
-        A blank board, or a robot that is not a relay, simply stays quiet; the
-        inventory backs off rather than rebooting it every scan.
+        Returns None if nothing answers -- not an error. A blank board simply
+        stays quiet; the inventory backs off rather than rebooting it every scan.
+        A robot answers in its own dialect and is named like any relay.
         """
         channel = await factory.open(port)
         try:
             await asyncio.sleep(self.open_settle)
             reader = Reader(channel)
             try:
-                return await self.hello(channel, reader)
+                info = await self.hello(channel, reader, pattern=IDENTITY_RE)
             except RelayError:
                 return None
+            if info.role == "RADIOBRIDGE":
+                return replace(info, firmware=await self.firmware_version(channel, reader))
+            if info.role in RELAY_ROLES:
+                return info                 # the older relay family has no version query
+            return replace(info, firmware=await self.robot_version(channel, reader))
         finally:
             await channel.close()

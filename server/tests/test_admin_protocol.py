@@ -237,7 +237,7 @@ async def test_names_answers_for_a_robot_nobody_has_asked_about(daemon):
     """An operator on the box should not have to curl their own daemon, so the
     registry is reachable here as well as over HTTP."""
     row = HANDLERS["names"](daemon, {"name": "tovez"})["name"]
-    assert (row["channel"], row["group"], row["source"]) == (55, 108, "derived")
+    assert (row["channel"], row["group"], row["source"]) == (48, 29, "derived")
 
 
 async def test_names_set_then_clear_moves_a_robot_and_puts_it_back(daemon):
@@ -246,7 +246,7 @@ async def test_names_set_then_clear_moves_a_robot_and_puts_it_back(daemon):
     assert HANDLERS["names"](daemon, {})["names"][0]["channel"] == 12
 
     row = HANDLERS["names_clear"](daemon, {"name": "tovez"})
-    assert (row["name"]["channel"], row["name"]["source"]) == (55, "derived")
+    assert (row["name"]["channel"], row["name"]["source"]) == (48, "derived")
 
 
 async def test_a_registry_refusal_arrives_as_an_admin_error(daemon):

@@ -71,6 +71,15 @@ async def test_acquire_hands_over_a_clean_board(cfg, manager, factory):
     assert (board.cfg.channel, board.cfg.mode, board.cfg.echo) == (0, "RAW250", "OFF")
 
 
+async def test_acquire_picks_up_a_reflashed_board_s_new_version(manager, factory):
+    """A known board is never re-probed, so without this a reflash would not
+    show in `mbrelay devices` until the daemon restarted."""
+    for port, name in ((PORT_A, "aaaaa"), (PORT_B, "bbbbb")):
+        factory.boards[port] = FakeRelayFirmware(name=name, version="9.9.9")
+    session = await manager.acquire("test:1")
+    assert session.record.firmware == "9.9.9"
+
+
 async def test_bytes_pass_through_untouched(manager):
     """Transparency is the product. Nulls, high bytes and CRLF must all survive."""
     session = await manager.acquire("test:1")

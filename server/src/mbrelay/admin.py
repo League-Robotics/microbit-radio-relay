@@ -165,7 +165,7 @@ def _names(daemon, args):
     on the box should not have to curl their own daemon."""
     if name := args.get("name"):
         try:
-            return {"name": daemon.registry.resolve(name).to_json()}
+            return {"name": daemon.registry.annotate(daemon.registry.resolve(name))}
         except RegistryError as exc:
             raise AdminError(str(exc), code=exc.code) from None
     return daemon.registry.listing()
@@ -182,7 +182,9 @@ def _names_set(daemon, args):
         raise AdminError("names set needs a channel and a group",
                          code="bad_request") from None
     try:
-        return {"name": daemon.registry.set(name, channel, group).to_json()}
+        # Annotated, so a move onto somebody else's link is flagged as it happens.
+        return {"name": daemon.registry.annotate(
+            daemon.registry.set(name, channel, group))}
     except RegistryError as exc:
         raise AdminError(str(exc), code=exc.code) from None
 
@@ -193,7 +195,7 @@ def _names_clear(daemon, args):
     if not name:
         raise AdminError("names clear needs a name", code="bad_request")
     try:
-        return {"name": daemon.registry.clear(name).to_json()}
+        return {"name": daemon.registry.annotate(daemon.registry.clear(name))}
     except RegistryError as exc:
         raise AdminError(str(exc), code=exc.code) from None
 

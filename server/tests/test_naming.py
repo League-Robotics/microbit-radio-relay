@@ -1,8 +1,8 @@
-"""name -> (channel, group) is a contract with the robot firmware and the host
-library. The normative spec lives in pxt-nezha-diffdrive; its machine-readable
-companion is mirrored here as radio-address-vectors.json, and these tests
-assert against that file -- the whole 3125-name space via its digest -- never
-against prose or a hand-copied table."""
+"""name -> (channel, group) is a contract between the relay firmware, mbrelay
+and the robot. The normative spec is docs/design/radio-addressing.md in
+radio-robot-lib; radio-address-vectors.json transcribes its digests and
+vectors, and these tests assert against that file -- the whole 3125-name space
+via its digest -- never against prose."""
 
 import hashlib
 import json
@@ -24,9 +24,9 @@ def _sha(text: str) -> str:
 
 def test_the_conformance_gate_d2_exercises_the_decoder_the_relay_runs():
     """D2 hashes decode(name) and reverse(channel, group) for every name. It is
-    the gate because decode() is what a registry lookup executes, and D1 never
-    calls it: a little-endian decoder passes D1 while being wrong on 96% of
-    names. The spec publishes that exact fault's D2 so it is nameable."""
+    the gate because decode() is what `!N` and a registry lookup execute, and
+    D1 never calls it. The spec publishes a little-endian decoder's D2 so that
+    fault is nameable."""
     props = SPEC["properties"]
     d2 = _sha(naming.canonical_form(version=2))
     assert d2 != props["conformance_sha256_broken_decode"]["digest"], \
@@ -45,8 +45,8 @@ def test_the_forward_only_digest_d1_still_holds_as_a_bisector():
 def test_a_well_formed_name_no_board_uses_is_still_an_address():
     """Malformed is not unknown. `pipip` belongs to no board, but it is a legal
     retune to a quiet pair; the address layer does not know which boards
-    exist and must not pretend to (that is the deploy-time silicon gate)."""
-    assert name_to_radio("pipip") == (51, 90)
+    exist and must not pretend to."""
+    assert name_to_radio("pipip") == (34, 59)
     with pytest.raises(ValueError):
         name_to_radio("robot1")            # malformed: no address exists
 
@@ -58,16 +58,13 @@ def test_the_published_vectors(v):
     assert name_to_radio(v["name"]) == (v["channel"], v["group"])
     assert radio_to_name(v["channel"], v["group"]) == v["name"]
     if v.get("evidence") == "silicon":
-        # The whole scheme rests on this: the name IS the device id in base 5.
+        # The whole scheme rests on this: the name IS the device id mod 3125.
         assert v["device_id"] % naming.SPACE == v["n"]
 
 
-def test_the_endianness_probe_is_not_a_palindrome():
+def test_the_endianness_probes_are_not_palindromes():
     """zuzuz / tatat / zavaz read the same in either digit order and cannot
-    catch a reversed encoder; the spec's probe can, and n=1 is zuzuv."""
-    probe = SPEC["properties"]["endianness_probe"]["vector"]
-    assert probe != probe[::-1] or True                      # (letters differ by position alphabet)
-    assert encode(decode(probe)) == probe
+    catch a reversed encoder; zuzuv and zotuz can."""
     assert encode(1) == "zuzuv" and decode("zuzuv") == 1
     assert decode("zotuz") == 225 and encode(225) == "zotuz"
 
@@ -84,38 +81,35 @@ def test_normalization_is_exactly_trim_and_lowercase():
     assert naming.normalize("\t ToVeZ\r\n") == "tovez"
 
 
-def test_reserved_values_are_never_emitted_and_ranges_hold():
-    reserved = SPEC["reserved"]
+def test_every_address_is_in_range_and_clear_of_the_reserved_low_values():
+    """Channels 0-10 and groups 0-14 are never emitted: the legacy fleet's
+    3/4/5, MakeCode's 7/0, and the relay's !C group 10."""
     ranges = SPEC["ranges"]
     for n in range(naming.SPACE):
         channel, group = address(n)
-        assert channel not in reserved["channels_never_emitted"]
-        assert group not in reserved["groups_never_emitted"]
         assert ranges["channel"]["min"] <= channel <= ranges["channel"]["max"]
-        assert (channel - ranges["channel"]["min"]) % ranges["channel"]["step"] == 0
-        assert 1 <= group <= 126 and group != 10
+        assert ranges["group"]["min"] <= group <= ranges["group"]["max"]
 
 
-def test_the_map_is_a_bijection_that_tiles_the_space_evenly():
-    props = SPEC["properties"]
+def test_every_name_has_its_own_pair_and_channels_are_shared_evenly():
+    """A pair is unique (73 and 241 are coprime, 3125 < 73 * 241); a channel
+    is not -- that is what the registry's channel-conflict warning is for."""
     pairs = [address(n) for n in range(naming.SPACE)]
-    assert len(set(pairs)) == props["distinct_pairs"] == props["total_names"]
+    assert len(set(pairs)) == SPEC["properties"]["distinct_pairs"] == naming.SPACE
     per_channel: dict[int, int] = {}
     per_group: dict[int, int] = {}
     for channel, group in pairs:
         per_channel[channel] = per_channel.get(channel, 0) + 1
         per_group[group] = per_group.get(group, 0) + 1
-    assert set(per_channel.values()) == {props["names_per_channel"]}
-    assert set(per_group.values()) == {props["names_per_group"]}
-    assert len(per_channel) == ranges_count(SPEC["ranges"]["channel"])
+    assert per_channel == {ch: 43 if ch <= 69 else 42 for ch in range(11, 84)}
+    assert per_group == {g: 13 if g <= 247 else 12 for g in range(15, 256)}
 
 
-def ranges_count(r):
-    return r["count"]
-
-
-def test_channel_25_is_inclusive_and_zeguz_sits_on_it():
-    assert name_to_radio("zeguz") == (25, 19)
+def test_no_two_fleet_robots_share_a_channel():
+    """The spec's reason for the change: under the old map vevov and togov
+    both sat on 37."""
+    robots = [v for v in SPEC["vectors"] if v.get("role") == "robot"]
+    assert len({v["channel"] for v in robots}) == len(robots)
 
 
 def test_every_name_round_trips_through_its_address():
@@ -123,8 +117,11 @@ def test_every_name_round_trips_through_its_address():
         assert radio_to_name(*address(n)) == encode(n)
 
 
-@pytest.mark.parametrize("channel,group", [(0, 10), (3, 10), (7, 0), (26, 5),
-                                           (25, 10), (25, 0), (25, 127), (75, 1)])
-def test_pairs_outside_the_derived_space_have_no_name(channel, group):
+@pytest.mark.parametrize("channel,group", [
+    *map(tuple, SPEC["no_name_pairs"]),
+    (0, 10), (3, 10), (7, 0), (10, 15), (84, 15), (11, 14), (11, 256),
+    (83, 255),                      # n = 17592: in range, but no name reaches it
+])
+def test_pairs_no_name_derives_are_refused(channel, group):
     with pytest.raises(ValueError):
         radio_to_name(channel, group)

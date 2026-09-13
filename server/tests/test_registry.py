@@ -38,7 +38,7 @@ def test_a_name_nobody_has_mentioned_still_resolves(registry):
     """"Always answers" is the property every caller is built on: a robot that
     has never been talked to has to be reachable by name the first time."""
     entry = registry.resolve("tovez")
-    assert (entry.channel, entry.group) == naming.name_to_radio("tovez") == (55, 108)
+    assert (entry.channel, entry.group) == naming.name_to_radio("tovez") == (48, 29)
     assert entry.source == DERIVED and entry.derived
 
 
@@ -54,7 +54,7 @@ def test_a_malformed_name_is_an_error_but_an_unknown_one_is_not(registry):
     """The spec is explicit: `pipip` is a legal address nobody is on, while
     `robot1` has no address at all. Refusing the first breaks tune-by-name;
     accepting the second invents a link on an arbitrary channel."""
-    assert registry.resolve("pipip").channel == 51
+    assert registry.resolve("pipip").channel == 34
     for bad in ("robot1", "gauti", "vevo", "", "aeiou"):
         with pytest.raises(RegistryError):
             registry.resolve(bad)
@@ -76,7 +76,7 @@ def test_an_override_moves_a_robot_off_its_derived_address(registry):
 def test_clearing_an_override_puts_the_robot_back_on_its_default(registry):
     registry.set("tovez", 12, 4)
     entry = registry.clear("tovez")
-    assert (entry.channel, entry.group, entry.source) == (55, 108, DERIVED)
+    assert (entry.channel, entry.group, entry.source) == (48, 29, DERIVED)
 
 
 @pytest.mark.parametrize("channel,group", [(84, 4), (-1, 4), (12, 256), (12, -1)])
@@ -170,7 +170,7 @@ def test_a_missing_file_is_simply_an_empty_registry(tmp_path):
 def test_reverse_lookup_reads_the_bijection_for_free(registry):
     """A name maps to its own pair with no record needed, which is what lets
     `mbrelay status` label a session for a robot nobody has registered."""
-    assert registry.name_for(55, 108) == "tovez"
+    assert registry.name_for(48, 29) == "tovez"
     assert registry.name_for(0, 10) is None          # the !C space is not derived
 
 
@@ -179,13 +179,13 @@ def test_reverse_lookup_follows_a_robot_that_moved(registry):
     is tovez now, and 55/108 is nobody."""
     registry.set("tovez", 12, 4)
     assert registry.name_for(12, 4) == "tovez"
-    assert registry.name_for(55, 108) is None
+    assert registry.name_for(48, 29) is None
 
 
 def test_a_pin_wins_the_reverse_lookup_too(tmp_path):
     registry = NameRegistry(_cfg(tmp_path, names={"tovez": "20/7"}))
     assert registry.name_for(20, 7) == "tovez"
-    assert registry.name_for(55, 108) is None
+    assert registry.name_for(48, 29) is None
 
 
 # -- conflicts ---------------------------------------------------------------
@@ -216,3 +216,52 @@ def test_the_listing_annotates_every_row_that_shares_a_link(registry):
         "getez": None, "tovez": ["vevov"], "vevov": ["tovez"]}
     assert listing["conflicts"] == [{"channel": 12, "group": 4,
                                      "names": ["tovez", "vevov"]}]
+
+
+def test_robots_on_one_channel_in_different_groups_are_a_channel_conflict(registry):
+    """Their groups filter each other's packets, but a group is only an address
+    byte: both still transmit on one frequency. tovez (48/29) and zuvig (48/52)
+    both derive channel 48."""
+    registry.resolve("tovez")
+    registry.resolve("zuvig")
+    assert registry.conflicts() == {}
+    assert registry.channel_conflicts() == {48: ["tovez", "zuvig"]}
+    assert registry.listing()["channel_conflicts"] == [
+        {"channel": 48, "names": ["tovez", "zuvig"]}]
+
+
+def test_a_derived_row_saved_under_an_old_mapping_is_re_derived_on_load(tmp_path):
+    """names.json caches derived pairs. When the mapping changed (25 + 2*(n%25)
+    became 11 + n%73), a daemon that trusted the file kept every robot on its
+    OLD default. An explicit move is a decision and survives untouched."""
+    (tmp_path / "names.json").write_text(json.dumps({"version": 1, "names": {
+        "tovez": {"channel": 55, "group": 108, "explicit": False, "updated": 1.0},
+        "vevov": {"channel": 12, "group": 4, "explicit": True, "updated": 2.0}}}))
+    registry = NameRegistry(_cfg(tmp_path))
+    registry.load()
+    tovez, vevov = registry.get("tovez"), registry.get("vevov")
+    assert (tovez.channel, tovez.group, tovez.source) == (48, 29, DERIVED)
+    assert (vevov.channel, vevov.group, vevov.source) == (12, 4, REGISTRY)
+    saved = json.loads((tmp_path / "names.json").read_text())["names"]
+    assert (saved["tovez"]["channel"], saved["tovez"]["group"]) == (48, 29)
+
+
+def test_one_clash_is_not_reported_at_both_severities(registry):
+    registry.set("tovez", 12, 4)
+    registry.set("vevov", 12, 4)
+    assert registry.channel_conflicts() == {}
+    assert "channel_conflict" not in registry.annotate(registry.get("tovez"))
+
+
+def test_a_shared_link_with_a_neighbour_on_its_channel_reports_both(registry):
+    registry.set("tovez", 12, 4)
+    registry.set("vevov", 12, 4)
+    registry.set("gopiv", 12, 5)
+    assert registry.conflicts() == {(12, 4): ["tovez", "vevov"]}
+    assert registry.channel_conflicts() == {12: ["gopiv", "tovez", "vevov"]}
+    rows = {r["name"]: r for r in registry.listing()["names"]}
+    assert rows["tovez"]["conflict"] == ["vevov"]
+    assert rows["tovez"]["channel_conflict"] == ["gopiv"]
+    assert "conflict" not in rows["gopiv"]
+    assert rows["gopiv"]["channel_conflict"] == ["tovez", "vevov"]
+    assert registry.annotate(registry.get("tovez")) == rows["tovez"]

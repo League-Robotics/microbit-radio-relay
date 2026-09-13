@@ -81,6 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
         d.add_argument("--refresh", action="store_true",
                        help="re-probe idle boards (never touches a busy one)")
         d.add_argument("--all", action="store_true", help="include departed boards")
+        d.add_argument("--no-probe", action="store_true",
+                       help="without a daemon: list USB only, do not open (and reset) "
+                            "each board to ask its name, role and firmware")
         d.set_defaults(func=cmd_devices)
 
     st = sub.add_parser("status", help="daemon status and live sessions")
@@ -121,7 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
     f = sub.add_parser("flash", help="reflash relay firmware via mbdeploy")
     f.add_argument("device", nargs="?", help="board name or UID")
     f.add_argument("--all-relays", action="store_true", help="every attached board")
-    f.add_argument("--hex", metavar="PATH")
+    f.add_argument("--hex", metavar="PATH", help="a local firmware image")
+    f.add_argument("--url", metavar="URL",
+                   help="download the image from here; with neither --hex nor --url "
+                        "the latest GitHub release is used")
     f.add_argument("--yes", "-y", action="store_true", help="skip the confirmation")
     f.set_defaults(func=cmd_flash)
 
@@ -259,11 +265,13 @@ def cmd_devices(args) -> int:
         rows = result["devices"]
     except DaemonNotRunning:
         # Work without the daemon, so you can see the hardware before starting it.
-        rows = _local_scan(cfg)
+        probe = not getattr(args, "no_probe", False)
         if not args.json:
-            print("(daemon not running -- showing a direct USB scan; "
-                  "'mbrelay devices --remote' lists the boards on relay hosts)",
+            print("(daemon not running -- asking each board directly"
+                  + (", which resets it" if probe else "; --no-probe: USB only")
+                  + "; 'mbrelay devices --remote' lists the boards on relay hosts)",
                   file=sys.stderr)
+        rows = _local_scan(cfg, probe=probe)
     except AdminError as exc:
         print(f"mbrelay: {exc}", file=sys.stderr)
         return EXIT_ERROR
@@ -276,19 +284,134 @@ def cmd_devices(args) -> int:
         return EXIT_OK
     print(_table(
         [[r.get("name", "?"), r.get("state", "?"), r.get("role") or "-",
-          r.get("port") or "-", r.get("session") or "-",
+          _firmware_cell(r), r.get("port") or "-", r.get("session") or "-",
           r.get("short_uid") or r["uid"][16:24]] for r in rows],
-        ["NAME", "STATE", "ROLE", "PORT", "SESSION", "UID"]))
+        ["NAME", "STATE", "ROLE", "FIRMWARE", "PORT", "SESSION", "UID"]))
+    for r in rows:
+        if r.get("last_error"):
+            print(f"  {r.get('name', '?')}: {r['last_error']}")
     return EXIT_OK
 
 
-def _local_scan(cfg) -> list[dict]:
+def _local_scan(cfg, probe: bool = True) -> list[dict]:
+    """Every micro:bit on USB, identified by asking it.
+
+    The daemon's own probe, so the name, role and firmware are what each board
+    says about itself -- robots included -- rather than a cache. Boards are
+    asked concurrently. Opening a port resets the board, which is why
+    ``--no-probe`` exists; without a probe, or when a board does not answer,
+    the name comes from a label or mbdeploy's registry.
+    """
+    import asyncio
+
+    from .inventory import DeviceRecord, DeviceState, apply_banner
     from .transport import scan_ports
-    labels = cfg.devices.labels
-    return [{"uid": uid, "port": info.device, "state": "unknown",
-             "short_uid": uid[16:24],
-             "name": labels.get(uid) or uid[16:24], "role": "", "session": None}
-            for uid, info in sorted(scan_ports().items())]
+
+    records = [DeviceRecord(uid=uid, port=info.device, label=cfg.devices.labels.get(uid, ""))
+               for uid, info in sorted(scan_ports().items())]
+    if probe and records:
+        from .relay import RelayControl
+        from .transport import SerialChannelFactory
+
+        control, factory = RelayControl(cfg), SerialChannelFactory()
+
+        async def identify(rec: DeviceRecord) -> None:
+            try:
+                banner = await asyncio.wait_for(control.probe(factory, rec.port), 20)
+            except Exception as exc:
+                if _port_in_use(exc):
+                    rec.state = DeviceState.BUSY
+                    rec.last_error = f"not asked: port held by {_port_holder(rec.port)}"
+                else:
+                    rec.state, rec.last_error = DeviceState.ERROR, str(exc) or repr(exc)
+                return
+            if banner is None:
+                rec.state = DeviceState.NO_FIRMWARE
+                rec.last_error = ("silent on USB: no answer to HELLO -- serial output "
+                                  "off, hung, or not firmware that announces itself")
+            else:
+                apply_banner(rec, banner, cfg.devices.allow_roles)
+
+        async def identify_all() -> None:
+            await asyncio.gather(*(identify(rec) for rec in records))
+
+        asyncio.run(identify_all())
+
+    known = _known_boards(cfg)
+    rows = []
+    for rec in records:
+        row = rec.to_json()
+        if not rec.device_name and rec.uid in known:
+            # The board did not say -- busy, silent, or not asked -- but a
+            # registry remembers it. Said so, since a registry goes stale.
+            name, role, source = known[rec.uid]
+            row["name"] = rec.label or name
+            row["role"] = row["role"] or role
+            row["last_error"] = "; ".join(
+                filter(None, [row["last_error"], f"name and role from {source}"]))
+        rows.append(row)
+    return rows
+
+
+def _port_in_use(exc: BaseException) -> bool:
+    """Did opening fail because another program has the port?"""
+    import errno
+
+    if getattr(exc, "errno", None) in (errno.EBUSY, errno.EAGAIN):
+        return True
+    text = str(exc).lower()
+    return "resource busy" in text or "exclusively lock" in text
+
+
+def _port_holder(port: str) -> str:
+    """Which program has a tty open, so the message says what to close."""
+    import subprocess
+
+    def run(*cmd: str) -> str:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=3).stdout
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    holders = [f"{run('ps', '-o', 'command=', '-p', pid).strip()[:60] or '?'} (pid {pid})"
+               for pid in run("lsof", "-t", port).split()[:3]]
+    return ", ".join(holders) or "another program"
+
+
+def _known_boards(cfg) -> dict[str, tuple[str, str, str]]:
+    """uid -> (name, role, file) from the device registries on this machine:
+    mbdeploy's (``firmware.registry``, and ``./config/devices.json``, mbdeploy's
+    own default), then ``[devices] registries``. The first file naming a uid
+    wins. Only for boards that could not be asked."""
+    from pathlib import Path
+
+    known: dict[str, tuple[str, str, str]] = {}
+    for path in (cfg.firmware.registry, "config/devices.json", *cfg.devices.registries):
+        try:
+            data = json.loads(Path(path).expanduser().read_text())
+        except (OSError, ValueError, TypeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for key, entry in data.items():
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("device_name") or entry.get("board_name")
+            uid = entry.get("uid") or key
+            if name and uid not in known:
+                known[uid] = (name, entry.get("role") or "", str(path))
+    return known
+
+
+def _firmware_cell(row: dict) -> str:
+    """The FIRMWARE column: a version, or what a board's silence on it means."""
+    if row.get("firmware"):
+        return row["firmware"]
+    if row.get("firmware_asked") and row.get("role") == "RADIOBRIDGE":
+        return "<0.20260913.2"          # answered, but predates !VER?
+    if row.get("firmware_asked") and row.get("role") == "RADIORELAY":
+        return "makecode relay"
+    return "-"
 
 
 def _remote_devices(args, cfg) -> int:
@@ -346,14 +469,15 @@ def _remote_devices(args, cfg) -> int:
             print(f"mbrelay: {name}{running}: {problem}", file=sys.stderr)
             continue
         rows += [[name, r.get("name", "?"), r.get("state", "?"), r.get("role") or "-",
-                  r.get("session") or "-", r.get("short_uid") or r["uid"][16:24]]
+                  _firmware_cell(r), r.get("session") or "-",
+                  r.get("short_uid") or r["uid"][16:24]]
                  for r in devices]
     if not answered:
         return EXIT_ERROR
     if not rows:
         print("no micro:bits found")
         return EXIT_OK
-    print(_table(rows, ["HOST", "NAME", "STATE", "ROLE", "SESSION", "UID"]))
+    print(_table(rows, ["HOST", "NAME", "STATE", "ROLE", "FIRMWARE", "SESSION", "UID"]))
     return EXIT_OK
 
 
@@ -505,9 +629,16 @@ def cmd_flash(args) -> int:
 
     cfg = _config(args)
     flasher = Flasher(cfg)
+    if args.hex and args.url:
+        print("mbrelay: give --hex or --url, not both", file=sys.stderr)
+        return EXIT_USAGE
+
+    def say(text: str) -> None:
+        # To stderr under --json, so stdout stays one JSON document.
+        print(text, file=sys.stderr if args.json else sys.stdout, flush=True)
+
     try:
         flasher.check()
-        hex_path = flasher.resolve_hex(args.hex)
         flasher.pyocd_cwd()
     except FlashError as exc:
         print(f"mbrelay: {exc}", file=sys.stderr)
@@ -532,7 +663,15 @@ def cmd_flash(args) -> int:
         print("mbrelay: no micro:bits attached", file=sys.stderr)
         return EXIT_NO_DEVICE
 
-    print(f"Flashing {len(targets)} board(s) with {hex_path}")
+    # Only now, so a mistyped board name costs no download.
+    try:
+        hex_path = flasher.resolve_source(args.hex, args.url, say=say)
+    except FlashError as exc:
+        print(f"mbrelay: {exc}", file=sys.stderr)
+        return EXIT_HARDWARE
+
+    names = _board_names(args)
+    say(f"Flashing {len(targets)} board(s) with {hex_path}")
     if not args.yes and sys.stdin.isatty():
         if input("Proceed? [y/N] ").strip().lower() not in ("y", "yes"):
             return EXIT_OK
@@ -540,20 +679,34 @@ def cmd_flash(args) -> int:
     # Take the boards out of rotation first, so the daemon does not open a port
     # mid-flash. Best-effort: flashing from a host with no daemon is normal.
     disabled = _quiesce(args, targets)
+    results = []
     try:
+        say("Refreshing mbdeploy's board registry ...")
         flasher.probe()
-        results = [flasher.deploy(uid, hex_path) for uid in targets]
+        for index, uid in enumerate(targets, 1):
+            label = f"[{index}/{len(targets)}] {names.get(uid) or uid[16:24]}"
+            # Said before the flash, not after: a board takes a minute or more,
+            # and a silent minute per board cannot be told apart from a hang.
+            say(f"{label}: flashing {uid[16:24]} ...")
+            started = time.monotonic()
+            result = flasher.deploy(uid, hex_path,
+                                    on_line=None if args.quiet else _progress(say))
+            say(f"{label}: {'ok' if result.ok else 'FAILED'} after "
+                f"{time.monotonic() - started:.0f}s"
+                + ("" if result.ok else f" -- {result.message}"))
+            results.append(result)
     except FlashError as exc:
         print(f"mbrelay: {exc}", file=sys.stderr)
         return EXIT_HARDWARE
     finally:
         _unquiesce(args, disabled)
 
-    for result in results:
-        print(f"  {'ok  ' if result.ok else 'FAIL'} {result.short_uid} {result.message}")
     failed = [r for r in results if not r.ok]
     if args.json:
         _emit(args, {"results": [r.__dict__ for r in results]})
+    elif len(results) > 1:
+        say(f"{len(results) - len(failed)} of {len(results)} flashed"
+            + (f"; failed: {', '.join(r.short_uid for r in failed)}" if failed else ""))
     return EXIT_HARDWARE if failed else EXIT_OK
 
 
@@ -566,6 +719,40 @@ def _resolve_by_name(args, attached: dict) -> list[str]:
     return [r["uid"] for r in rows
             if r["uid"] in attached and args.device.lower() in
             {r.get("name", "").lower(), r.get("device_name", "").lower()}]
+
+
+def _board_names(args) -> dict[str, str]:
+    """uid -> the daemon's name for it, for progress lines; {} with no daemon."""
+    try:
+        with _client(args) as client:
+            rows = client.call("list", all=True)["devices"]
+    except MbrelayError:
+        return {}
+    return {r["uid"]: r.get("name") or r["uid"][16:24] for r in rows}
+
+
+def _progress(say):
+    """Echo mbdeploy's output, indented under the board it belongs to.
+
+    pyocd redraws its progress bar with carriage returns, which arrive as a
+    burst of lines differing only in the percentage, so those are shown only
+    when it has moved on by a tenth.
+    """
+    import re
+
+    last = [-10]
+
+    def show(line: str) -> None:
+        text = line.strip()
+        if not text:
+            return
+        if match := re.search(r"(\d{1,3})%", text):
+            percent = int(match.group(1))
+            if percent < last[0] + 10 and percent != 100:
+                return
+            last[0] = percent
+        say(f"      {text}")
+    return show
 
 
 def _quiesce(args, uids: list[str]) -> list[str]:
@@ -712,7 +899,7 @@ def _pick_host(hosts):
 
 def cmd_connect(args) -> int:
     from .client import (RegistryUnreachable, RobotTuneError, connect, interactive,
-                         parse_connect_target, parse_target, resolve_robot,
+                         lookup_robot, parse_connect_target, parse_target,
                          run_script, tune_to_robot)
 
     try:
@@ -744,17 +931,21 @@ def cmd_connect(args) -> int:
     link = None
     if want.robot:
         try:
-            channel, group, source = resolve_robot(host, want.robot,
-                                                   port=cfg.registry.port)
+            row = lookup_robot(host, want.robot, port=cfg.registry.port)
         except RegistryUnreachable as exc:
             channel, group = exc.channel, exc.group
             print(f"mbrelay: no registry on {host}:{cfg.registry.port} "
                   f"({exc.detail}); using {want.robot}'s derived address "
                   f"{channel}/{group}", file=sys.stderr)
         else:
-            if source != "derived":
+            channel, group = row["channel"], row["group"]
+            if row["source"] != "derived":
                 print(f"mbrelay: registry puts {want.robot} on "
-                      f"{channel}/{group} ({source})", file=sys.stderr)
+                      f"{channel}/{group} ({row['source']})", file=sys.stderr)
+            # Warn, never refuse: the user may be connecting precisely to sort
+            # the clash out.
+            for line in _conflict_lines({"name": want.robot, **row}):
+                print(f"mbrelay: {line}", file=sys.stderr)
         link = (channel, group)
 
     try:
@@ -811,7 +1002,33 @@ def cmd_names(args) -> int:
 
 def _one_name(row: dict) -> str:
     line = f"{row['name']}  channel {row['channel']}  group {row['group']}  ({row['source']})"
-    return line if row["derived"] else line + "  -- moved off its derived address"
+    if not row["derived"]:
+        line += "  -- moved off its derived address"
+    return "\n".join([line, *_conflict_lines(row)])
+
+
+def _conflict_lines(row: dict) -> list[str]:
+    """What a registry row says is wrong with a robot's link, worst first.
+    Empty for a row from a daemon that predates conflict annotation."""
+    lines = []
+    if row.get("conflict"):
+        lines.append(f"ERROR: {row['name']} shares link {row['channel']}/{row['group']} "
+                     f"with {', '.join(row['conflict'])} -- each robot acts on the "
+                     "other's commands; move one")
+    if row.get("channel_conflict"):
+        lines.append(f"warning: {row['name']} shares channel {row['channel']} with "
+                     f"{', '.join(row['channel_conflict'])} in another group -- they "
+                     "ignore each other's packets but collide on the air when both run")
+    return lines
+
+
+def _conflict_cell(row: dict) -> str:
+    cells = []
+    if row.get("conflict"):
+        cells.append("ERROR link: " + ", ".join(row["conflict"]))
+    if row.get("channel_conflict"):
+        cells.append("warning channel: " + ", ".join(row["channel_conflict"]))
+    return "; ".join(cells) or "-"
 
 
 def _name_table(result: dict) -> str:
@@ -819,13 +1036,22 @@ def _name_table(result: dict) -> str:
     if not rows:
         return ("no names on record yet -- one appears the first time anything "
                 "asks where a robot is")
-    table = _table([[r["name"], r["channel"], r["group"], r["source"],
-                     ", ".join(r.get("conflict", [])) or "-"] for r in rows],
-                   ["NAME", "CHANNEL", "GROUP", "SOURCE", "SHARES LINK WITH"])
-    if result.get("conflicts"):
-        table += ("\n\nnote: the links marked above are held by more than one "
-                  "robot. That is allowed -- a survey is expected to pass "
-                  "through it -- but those robots will hear each other.")
+    table = _table([[r["name"], r["channel"], r["group"], r["source"], _conflict_cell(r)]
+                    for r in rows],
+                   ["NAME", "CHANNEL", "GROUP", "SOURCE", "CONFLICT"])
+    notes = [f"ERROR    link {c['channel']}/{c['group']} is held by "
+             f"{', '.join(c['names'])}. Each robot receives the others' packets "
+             "and acts on their commands -- move all but one with "
+             "'mbrelay names set <robot> <channel>/<group>'."
+             for c in result.get("conflicts", [])]
+    group_of = {r["name"]: r["group"] for r in rows}
+    notes += [f"warning  channel {c['channel']} is shared by "
+              + ", ".join(f"{n} (group {group_of.get(n, '?')})" for n in c["names"])
+              + ". Their groups keep them from hearing each other, but they "
+              "transmit on one frequency and collide whenever both are running."
+              for c in result.get("channel_conflicts", [])]
+    if notes:
+        table += "\n\n" + "\n".join(notes)
     return table
 
 

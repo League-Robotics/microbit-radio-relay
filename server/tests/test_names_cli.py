@@ -55,7 +55,7 @@ def test_a_registry_that_does_not_answer_offers_the_derived_address(monkeypatch)
     monkeypatch.setattr("urllib.request.urlopen", urlopen)
     with pytest.raises(RegistryUnreachable) as caught:
         resolve_robot("torture", "tovez")
-    assert (caught.value.channel, caught.value.group) == (55, 108)
+    assert (caught.value.channel, caught.value.group) == (48, 29)
 
 
 def test_a_malformed_name_is_never_papered_over_with_a_fallback(monkeypatch):
@@ -112,10 +112,42 @@ def test_connect_says_out_loud_when_it_fell_back_to_the_derived_address(
     assert main(["connect", "tovez@203.0.113.5"]) == EXIT_ERROR
     err = capsys.readouterr().err
     assert "no registry on 203.0.113.5:8761" in err
-    assert "derived address 55/108" in err
+    assert "derived address 48/29" in err
+
+
+def test_connect_warns_about_a_clash_but_still_dials(dialled, monkeypatch, capsys):
+    """Warn, never refuse: connecting may be exactly how the clash gets fixed."""
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=None: _Response(
+        {"name": "tovez", "channel": 55, "group": 108, "source": "derived",
+         "conflict": ["zatuv"], "channel_conflict": ["tigez"]}))
+    assert main(["connect", "tovez@203.0.113.5"]) == EXIT_ERROR
+    err = capsys.readouterr().err
+    assert "ERROR: tovez shares link 55/108 with zatuv" in err
+    assert "warning: tovez shares channel 55 with tigez" in err
+    assert dialled, "a clash must not stop the connection"
 
 
 # -- the subcommand ----------------------------------------------------------
+def test_the_names_table_tells_an_error_from_a_warning(tmp_path):
+    from mbrelay.cli import _name_table, _one_name
+    from mbrelay.config import load as load_config
+    from mbrelay.registry import NameRegistry
+
+    registry = NameRegistry(load_config(overrides={"state.dir": str(tmp_path)},
+                                        environ={}))
+    registry.set("tovez", 12, 4)
+    registry.set("vevov", 12, 4)
+    registry.resolve("tigez")                                      # 52/179
+    registry.set("gopiv", 52, 1)
+    text = _name_table(registry.listing())
+    assert "ERROR    link 12/4 is held by tovez, vevov" in text
+    assert "warning  channel 52 is shared by gopiv (group 1), tigez (group 179)" in text
+    assert "ERROR link: vevov" in text and "warning channel: gopiv" in text
+    assert "warning: tigez shares channel 52 with gopiv" in _one_name(
+        registry.annotate(registry.get("tigez")))
+
+
+
 def test_names_set_rejects_a_link_that_is_not_channel_slash_group(capsys):
     assert main(["names", "set", "tovez", "12"]) == EXIT_USAGE
     assert "channel>/<group" in capsys.readouterr().err

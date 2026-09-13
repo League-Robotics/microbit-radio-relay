@@ -150,12 +150,13 @@ def _one(registry, request: Request, name: str, body: bytes) -> tuple[int, dict]
     if request.method == "GET":
         # Creates on miss, deliberately: it is what makes "the registry always
         # answers" true, which is the property every caller is built on.
-        return 200, registry.resolve(name).to_json()
+        # Annotated, so whoever asked about one robot also learns it clashes.
+        return 200, registry.annotate(registry.resolve(name))
     if request.method == "PUT":
         channel, group = _pair_from_body(body)
-        return 200, registry.set(name, channel, group).to_json()
+        return 200, registry.annotate(registry.set(name, channel, group))
     if request.method == "DELETE":
-        return 200, registry.clear(name).to_json()
+        return 200, registry.annotate(registry.clear(name))
     return _require(request, "GET", "PUT", "DELETE")
 
 
@@ -180,7 +181,8 @@ def _pair_from_body(body: bytes) -> tuple[int, int]:
 
 def _status(registry) -> dict:
     return {"version": __version__, "names": len(registry.all()),
-            "conflicts": len(registry.conflicts())}
+            "conflicts": len(registry.conflicts()),
+            "channel_conflicts": len(registry.channel_conflicts())}
 
 
 def _error(code: str, message: str) -> dict:

@@ -261,5 +261,6 @@ class Daemon:
             "sessions": self.sessions.to_json(),
             "registry": {**self.httpapi.to_json(),
                          "names": len(self.registry.all()),
-                         "conflicts": len(self.registry.conflicts())},
+                         "conflicts": len(self.registry.conflicts()),
+                         "channel_conflicts": len(self.registry.channel_conflicts())},
         }

@@ -63,6 +63,11 @@ async def test_boards_are_discovered_and_classified(inventory):
                                   "releasing": 0, "error": 0, "other": 0}
 
 
+async def test_the_firmware_version_is_recorded_and_listed(inventory):
+    assert inventory.records[UID_A].firmware == "0.20260913.2"
+    assert {r["firmware"] for r in inventory.listing()} == {"0.20260913.2"}
+
+
 async def test_a_board_without_relay_firmware_is_marked_not_probed_forever(
         cfg, factory, scanner):
     silent = FakeRelayFirmware(drop_first_banners=99)
@@ -199,6 +204,69 @@ async def test_cached_identity_avoids_a_second_probe(cfg, factory, scanner):
         assert inv2.records[UID_A].state is DeviceState.FREE
     finally:
         await inv2.stop()
+
+
+async def test_a_cache_from_before_version_probes_is_probed_once_more(cfg, factory,
+                                                                     scanner):
+    """A daemon that predates !VER? cached role and name but no firmware. Trusting
+    that cache showed FIRMWARE blank forever, even on freshly flashed boards."""
+    import json
+    from pathlib import Path
+    (Path(cfg.state.dir) / "devices.json").write_text(
+        json.dumps({"version": 1, "devices": {UID_A: {"role": "RADIOBRIDGE",
+                                                      "device_name": "aaaaa"}}}))
+    control = RelayControl(cfg)
+    before = factory.boards[PORT_A].boot_count
+    inv = Inventory(cfg, scanner, prober=lambda r: control.probe(factory, r.port))
+    await inv.start()
+    await _settle(inv)
+    await inv.stop()
+    assert factory.boards[PORT_A].boot_count > before, "the stale cache was trusted"
+    assert inv.records[UID_A].firmware == "0.20260913.2"
+
+    after = factory.boards[PORT_A].boot_count
+    inv2 = Inventory(cfg, scanner, prober=lambda r: control.probe(factory, r.port))
+    await inv2.start()
+    await _settle(inv2)
+    try:
+        assert factory.boards[PORT_A].boot_count == after, "probed a second time"
+        assert inv2.records[UID_A].firmware == "0.20260913.2"
+    finally:
+        await inv2.stop()
+
+
+async def test_a_robot_is_named_with_its_role_and_firmware_but_never_pooled(
+        cfg, factory, scanner):
+    """A robot on a relay host used to come back "no_firmware" -- its banner is
+    another dialect -- and be rebooted on every backoff retry."""
+    from fake_relay import FakeRobotFirmware
+
+    factory.boards[PORT_A] = FakeRobotFirmware(name="tovez", serial="2314287040")
+    control = RelayControl(cfg)
+    inv = Inventory(cfg, scanner, prober=lambda r: control.probe(factory, r.port))
+    await inv.start()
+    await _settle(inv)
+    try:
+        robot = inv.records[UID_A]
+        assert (robot.name, robot.role, robot.firmware, robot.nrf_serial) == (
+            "tovez", "NEZHA2", "1.20260912.8", "2314287040")
+        assert robot.state is DeviceState.FOREIGN
+        assert robot not in inv.free_devices()
+        assert not any(c.startswith(b"!") for c in factory.boards[PORT_A].commands), \
+            "relay commands were sent to a robot"
+    finally:
+        await inv.stop()
+
+
+def test_both_identity_dialects_parse():
+    from mbrelay.relay import BannerInfo
+    relay = BannerInfo.parse(b"DEVICE:RADIOBRIDGE:relay:getez:1784514240\r\n")
+    robot = BannerInfo.parse(b"device NEZHA2 robot tovez 2314287040\n")
+    boot = BannerInfo.parse(b"DEVICE:NEZHA2:robot:gopiv:2175407711\r\n")
+    assert (relay.role, relay.device_name, relay.serial) == ("RADIOBRIDGE", "getez", "1784514240")
+    assert (robot.role, robot.device_name, robot.serial) == ("NEZHA2", "tovez", "2314287040")
+    assert (boot.role, boot.device_name) == ("NEZHA2", "gopiv")
+    assert BannerInfo.parse(b"# channel: 0 group: 10\n") is None
 
 
 async def test_a_busy_board_is_never_probed(inventory, factory):

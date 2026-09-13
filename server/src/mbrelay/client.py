@@ -197,7 +197,16 @@ class RobotResolveError(Exception):
 
 def resolve_robot(host: str, robot: str, port: int = 8761,
                   timeout: float = 3.0) -> tuple[int, int, str]:
-    """Ask the relay host's registry where `robot` is: (channel, group, source).
+    """Ask the relay host's registry where `robot` is: (channel, group, source)."""
+    row = lookup_robot(host, robot, port=port, timeout=timeout)
+    return row["channel"], row["group"], row["source"]
+
+
+def lookup_robot(host: str, robot: str, port: int = 8761,
+                 timeout: float = 3.0) -> dict:
+    """The registry's whole row for `robot`: ``channel`` and ``group`` as ints,
+    ``source``, and -- from a daemon new enough to say -- ``conflict`` and
+    ``channel_conflict``, the robots it clashes with.
 
     Falls back to the name's derived address when the registry cannot be
     reached, because a relay host running an older daemon -- or one whose
@@ -216,7 +225,8 @@ def resolve_robot(host: str, robot: str, port: int = 8761,
     try:
         with urllib.request.urlopen(url, timeout=timeout) as response:
             data = json.loads(response.read())
-        return int(data["channel"]), int(data["group"]), data.get("source", "registry")
+        return {**data, "channel": int(data["channel"]), "group": int(data["group"]),
+                "source": data.get("source", "registry")}
     except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as exc:
         channel, group = name_to_radio(name)
         raise RegistryUnreachable(channel, group, f"{url}: {exc}") from None

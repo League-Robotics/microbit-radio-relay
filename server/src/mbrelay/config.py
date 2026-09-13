@@ -110,6 +110,11 @@ class DevicesConfig:
     max_concurrent_probes: int = 2
     probe_backoff_ms: tuple[int, ...] = (5000, 15000, 60000, 300000)
     labels: dict[str, str] = field(default_factory=dict)   # uid -> friendly label
+    # Extra device registries (mbdeploy-format devices.json, keyed by uid) that
+    # `mbrelay devices` names a board from when it cannot ask the board itself --
+    # its port held by another program, say. mbdeploy's own registry and
+    # ./config/devices.json are always read; an answer from the board wins.
+    registries: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,7 +137,13 @@ class AdminConfig:
 
 @dataclass(frozen=True)
 class FirmwareConfig:
+    # What `mbrelay flash` writes when the command line names nothing: a path or
+    # an http(s) URL. Empty means release_url.
     hex: str = ""
+    # The newest published release. GitHub redirects /releases/latest/download/
+    # to the asset of whichever release carries the "Latest" badge.
+    release_url: str = ("https://github.com/League-Robotics/microbit-radio-relay/"
+                        "releases/latest/download/MICROBIT.hex")
     mbdeploy: str = "mbdeploy"
     # mbdeploy's OWN device registry. Deliberately NOT <state.dir>/devices.json:
     # that is mbrelay's identity cache, and the two formats are different --

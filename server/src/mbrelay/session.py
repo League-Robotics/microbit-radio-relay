@@ -298,6 +298,9 @@ class SessionManager:
                         f"expected {record.device_name}, got {info.device_name}")
                 record.role, record.device_name = info.role, info.device_name
                 record.nrf_serial, record.banner_raw = info.serial, info.raw
+                # On every acquire, not only at the probe: a known board is never
+                # re-probed, so this is where one reflashed since shows its new build.
+                record.firmware = await self.control.firmware_version(channel, reader)
                 await self.control.normalize(channel, reader)
             except BaseException:
                 await channel.close()

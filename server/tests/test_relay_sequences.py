@@ -194,6 +194,22 @@ async def test_probe_returns_none_for_a_board_with_no_firmware(cfg, factory, con
     assert await control.probe(factory, PORT_A) is None
 
 
+async def test_probe_reads_the_firmware_version(cfg, factory, control):
+    info = await control.probe(factory, PORT_A)
+    assert info.device_name == "aaaaa" and info.firmware == "0.20260913.2"
+
+
+async def test_firmware_older_than_ver_is_still_a_relay_and_costs_no_timeout(
+        cfg, factory, control):
+    """It refuses !VER? as unknown; that answer ends the wait, not the timeout."""
+    factory.boards[PORT_A] = FakeRelayFirmware(name="aaaaa", version=None)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    info = await control.probe(factory, PORT_A)
+    assert info.device_name == "aaaaa" and info.firmware == ""
+    assert loop.time() - started < 0.5
+
+
 def test_normalize_steps_cover_every_persisted_setting():
     """The firmware persists channel, group, power, mode, frag and echo. Miss one
     and it leaks from one client to the next."""

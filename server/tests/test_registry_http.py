@@ -43,7 +43,7 @@ def put(registry, path: str, body: str) -> tuple[int, dict]:
 def test_asking_where_a_robot_is_answers_and_records_it(registry):
     status, payload = get(registry, "/names/tovez")
     assert status == 200
-    assert (payload["channel"], payload["group"]) == (55, 108)
+    assert (payload["channel"], payload["group"]) == (48, 29)
     assert payload["source"] == "derived" and payload["derived"] is True
     assert get(registry, "/names")[1]["names"][0]["name"] == "tovez"
 
@@ -54,7 +54,7 @@ def test_a_put_moves_a_robot_and_a_delete_puts_it_back(registry):
               "derived": False,
               "updated": get(registry, "/names/tovez")[1]["updated"]})
     status, payload = call(registry, b"DELETE /names/tovez HTTP/1.1\r\n\r\n")
-    assert status == 200 and (payload["channel"], payload["source"]) == (55, "derived")
+    assert status == 200 and (payload["channel"], payload["source"]) == (48, "derived")
 
 
 def test_the_listing_names_who_shares_a_link(registry):
@@ -65,6 +65,22 @@ def test_the_listing_names_who_shares_a_link(registry):
                                      "names": ["tovez", "vevov"]}]
     assert {r["name"]: r.get("conflict") for r in payload["names"]} == {
         "tovez": ["vevov"], "vevov": ["tovez"]}
+
+
+def test_one_robot_s_row_says_who_it_clashes_with(registry):
+    """`mbrelay connect` asks about one robot, so that answer has to carry the
+    warning -- nobody fetches the whole listing just to tune."""
+    put(registry, "/names/tovez", '{"channel": 12, "group": 4}')
+    assert put(registry, "/names/vevov", '{"channel": 12, "group": 4}')[1][
+        "conflict"] == ["tovez"]
+    get(registry, "/names/tigez")                                  # derives 52/179
+    put(registry, "/names/gopiv", '{"channel": 52, "group": 1}')
+    one = get(registry, "/names/tigez")[1]
+    assert one["channel_conflict"] == ["gopiv"] and "conflict" not in one
+    assert get(registry, "/names")[1]["channel_conflicts"] == [
+        {"channel": 52, "names": ["gopiv", "tigez"]}]
+    status = get(registry, "/status")[1]
+    assert (status["conflicts"], status["channel_conflicts"]) == (1, 1)
 
 
 def test_status_is_a_liveness_probe_for_tooling(registry):
@@ -176,7 +192,7 @@ async def test_a_real_request_over_a_real_socket_round_trips(cfg):
         writer.close()
         head, _, body = raw.partition(b"\r\n\r\n")
         assert head.startswith(b"HTTP/1.1 200 OK")
-        assert json.loads(body)["channel"] == 55
+        assert json.loads(body)["channel"] == 48
     finally:
         await api.stop()
 

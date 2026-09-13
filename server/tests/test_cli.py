@@ -86,11 +86,99 @@ def test_devices_falls_back_to_a_local_scan(short_sock, monkeypatch, capsys):
     uid = "9906360200052820abcd2372c44f4f67000000006e052820"
     monkeypatch.setattr("mbrelay.transport.scan_ports",
                         lambda: {uid: PortInfo(uid=uid, device="/dev/fake")})
+    monkeypatch.setattr("mbrelay.cli._known_boards", lambda cfg: {})
+
+    async def silent(self, factory, port):
+        return None
+
+    monkeypatch.setattr("mbrelay.relay.RelayControl.probe", silent)
     assert cli.main(["--socket", str(short_sock), "devices"]) == EXIT_OK
     out = capsys.readouterr()
     assert "/dev/fake" in out.out
     assert "abcd2372" in out.out          # the distinguishing slice, not the tail
+    assert "no_firmware" in out.out and "silent on USB" in out.out
     assert "daemon not running" in out.err
+
+
+def test_devices_without_a_daemon_asks_each_board_who_it_is(short_sock, monkeypatch,
+                                                            capsys):
+    """Not a hex slice and "unknown": the board's own name, role and firmware,
+    for a relay and a robot alike."""
+    from mbrelay import cli
+    from mbrelay.relay import BannerInfo
+    from mbrelay.transport import PortInfo
+    relay = "99063602000528208939f0a5fd47f738000000006e052820"
+    robot = "9906360200052820a8fdb5e413abb276000000006e052820"
+    old = "99063602000528202e78ea8f7143163f000000006e052820"
+    monkeypatch.setattr("mbrelay.transport.scan_ports", lambda: {
+        relay: PortInfo(uid=relay, device="/dev/fake-relay"),
+        robot: PortInfo(uid=robot, device="/dev/fake-robot"),
+        old: PortInfo(uid=old, device="/dev/fake-old")})
+    monkeypatch.setattr("mbrelay.cli._known_boards", lambda cfg: {})
+    answers = {
+        "/dev/fake-relay": BannerInfo("RADIOBRIDGE", "vitut", "2198604104", b"",
+                                      firmware="0.20260913.2"),
+        "/dev/fake-robot": BannerInfo("NEZHA2", "tovez", "2314287040", b"",
+                                      firmware="1.20260912.8"),
+        "/dev/fake-old": BannerInfo("RADIOBRIDGE", "vevav", "1", b"")}
+
+    async def probe(self, factory, port):
+        return answers[port]
+
+    monkeypatch.setattr("mbrelay.relay.RelayControl.probe", probe)
+    assert cli.main(["--socket", str(short_sock), "devices"]) == EXIT_OK
+    lines = {line.split()[0]: line.split() for line in capsys.readouterr().out.splitlines()
+             if line.split() and line.split()[0] in ("vitut", "tovez", "vevav")}
+    assert lines["vitut"][1:4] == ["free", "RADIOBRIDGE", "0.20260913.2"]
+    assert lines["tovez"][1:4] == ["foreign", "NEZHA2", "1.20260912.8"]
+    assert lines["vevav"][1:4] == ["free", "RADIOBRIDGE", "<0.20260913.2"], \
+        "a relay that answered but has no !VER? is older firmware, not unknown"
+
+
+def test_devices_names_a_board_another_program_holds_and_says_who(short_sock,
+                                                                  monkeypatch, capsys):
+    import errno
+
+    from mbrelay import cli
+    from mbrelay.transport import PortInfo
+    uid = "9906360200052820a8fdb5e413abb276000000006e052820"
+    monkeypatch.setattr("mbrelay.transport.scan_ports",
+                        lambda: {uid: PortInfo(uid=uid, device="/dev/fake")})
+    monkeypatch.setattr("mbrelay.cli._known_boards", lambda cfg: {
+        uid: ("tovez", "NEZHA2", "radio-robot-lib/config/robots/devices.json")})
+    monkeypatch.setattr("mbrelay.cli._port_holder",
+                        lambda port: "node scripts/dev.mjs (pid 56603)")
+
+    async def held(self, factory, port):
+        raise OSError(errno.EBUSY, "could not open port /dev/fake: Resource busy")
+
+    monkeypatch.setattr("mbrelay.relay.RelayControl.probe", held)
+    assert cli.main(["--socket", str(short_sock), "devices"]) == EXIT_OK
+    out = capsys.readouterr().out
+    row = next(line.split() for line in out.splitlines() if line.startswith("tovez"))
+    assert row[1:3] == ["busy", "NEZHA2"]
+    assert "held by node scripts/dev.mjs (pid 56603)" in out
+    assert "from radio-robot-lib/config/robots/devices.json" in out
+
+
+def test_devices_no_probe_leaves_the_boards_alone_and_names_them_from_mbdeploy(
+        short_sock, monkeypatch, capsys):
+    from mbrelay import cli
+    from mbrelay.transport import PortInfo
+    uid = "99063602000528208939f0a5fd47f738000000006e052820"
+    monkeypatch.setattr("mbrelay.transport.scan_ports",
+                        lambda: {uid: PortInfo(uid=uid, device="/dev/fake")})
+    monkeypatch.setattr("mbrelay.cli._known_boards",
+                        lambda cfg: {uid: ("vitut", "RADIOBRIDGE", "mbdeploy-registry.json")})
+
+    async def never(self, factory, port):
+        raise AssertionError("--no-probe opened a port, which resets the board")
+
+    monkeypatch.setattr("mbrelay.relay.RelayControl.probe", never)
+    assert cli.main(["--socket", str(short_sock), "devices", "--no-probe"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert any(line.split()[:1] == ["vitut"] for line in out.splitlines())
+    assert "name and role from mbdeploy-registry.json" in out
 
 
 def test_config_show_reports_where_each_value_came_from(capsys):
@@ -129,18 +217,28 @@ def flasher(tmp_path):
     return Flasher(cfg), tmp_path
 
 
+class FakePopen:
+    """subprocess.Popen for mbdeploy: records the call, replays canned output."""
+    lines = ["Erasing chip...", "[====      ] 40%", "[==========] 100%", "Done."]
+    returncode = 0
+
+    def __init__(self, cmd, **kwargs):
+        FakePopen.cmd, FakePopen.cwd = cmd, kwargs.get("cwd")
+        self.stdout = iter(line + "\n" for line in self.lines)
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        pass
+
+
 def test_deploy_argv_is_exactly_what_mbdeploy_needs(flasher, monkeypatch):
     flash, tmp_path = flasher
-    captured = {}
-
-    def fake_run(cmd, **kwargs):
-        captured["cmd"] = cmd
-        captured["cwd"] = kwargs.get("cwd")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
     uid = "9906360200052820abcd2372c44f4f67000000006e052820"
     result = flash.deploy(uid, tmp_path / "MICROBIT.hex")
+    captured = {"cmd": FakePopen.cmd, "cwd": FakePopen.cwd}
 
     assert result.ok
     cmd = captured["cmd"]
@@ -168,6 +266,81 @@ def test_missing_hex_is_refused(flasher):
     flash, tmp_path = flasher
     with pytest.raises(FlashError, match="not found"):
         flash.resolve_hex(str(tmp_path / "absent.hex"))
+
+
+def test_deploy_hands_over_output_as_it_arrives(flasher, monkeypatch):
+    """A board takes a minute or more; captured-until-the-end output made a
+    working flash indistinguishable from a hung one."""
+    flash, tmp_path = flasher
+    monkeypatch.setattr(subprocess, "Popen", FakePopen)
+    seen = []
+    result = flash.deploy("9906360200052820abcd2372c44f4f67000000006e052820",
+                          tmp_path / "MICROBIT.hex", on_line=seen.append)
+    assert seen == FakePopen.lines
+    assert result.ok and result.message == "Done."
+
+
+@pytest.fixture
+def downloads(monkeypatch):
+    """Serve canned (body, redirect hops) by URL instead of reaching GitHub."""
+    served = {}
+    asked = []
+
+    def fetch(url, timeout):
+        asked.append(url)
+        body, hops = served[url]
+        return hops, body
+
+    monkeypatch.setattr("mbrelay.firmware._fetch", fetch)
+    return served, asked
+
+
+def bare_flasher(tmp_path, **overrides):
+    from mbrelay.config import load
+    return Flasher(load(overrides={"state.dir": str(tmp_path), **overrides}, environ={}))
+
+
+def test_no_hex_and_no_url_means_the_latest_release(tmp_path, downloads):
+    served, asked = downloads
+    flash = bare_flasher(tmp_path)
+    latest = flash.cfg.firmware.release_url
+    assert "League-Robotics/microbit-radio-relay/releases/latest" in latest
+    # What GitHub really does: latest -> the tagged asset -> a signed blob URL.
+    served[latest] = (b":00000001FF\n", [
+        latest.replace("latest/download", "download/v0.20260913.2"),
+        "https://release-assets.githubusercontent.com/github-production-release-asset/1?sig=x"])
+    said = []
+    path = flash.resolve_source(say=said.append)
+    assert asked == [latest]
+    assert path.read_bytes() == b":00000001FF\n"
+    assert "  release: v0.20260913.2" in said, "the release tag is shown"
+    assert not any("sig=" in line for line in said), "not the signed storage URL"
+
+
+def test_a_url_wins_over_the_configured_image(tmp_path, downloads):
+    served, asked = downloads
+    (tmp_path / "configured.hex").write_text(":00000001FF\n")
+    flash = bare_flasher(tmp_path, **{"firmware.hex": str(tmp_path / "configured.hex")})
+    served["https://example.com/x.hex"] = (b":00000001FF\n", [])
+    flash.resolve_source(url="https://example.com/x.hex", say=lambda s: None)
+    assert asked == ["https://example.com/x.hex"]
+    # ...and with no flag at all, the configured image is what gets used.
+    assert flash.resolve_source(say=lambda s: None) == (tmp_path / "configured.hex").resolve()
+
+
+def test_a_download_that_is_not_a_hex_image_is_refused(tmp_path, downloads):
+    """A wrong GitHub URL answers with an HTML page, not an error status."""
+    served, _ = downloads
+    served["https://example.com/nope"] = (b"<!DOCTYPE html><html>", [])
+    with pytest.raises(FlashError, match="not an Intel HEX"):
+        bare_flasher(tmp_path).resolve_source(url="https://example.com/nope",
+                                              say=lambda s: None)
+
+
+def test_hex_and_url_together_is_a_usage_error(capsys):
+    assert main(["flash", "--all-relays", "--hex", "a.hex", "--url", "https://x/y.hex"]) \
+        == EXIT_USAGE
+    assert "not both" in capsys.readouterr().err
 
 
 def test_missing_mbdeploy_explains_how_to_install_it(flasher, monkeypatch):

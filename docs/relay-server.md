@@ -193,14 +193,19 @@ To see the **boards** rather than the hosts, ask for them remotely:
 
 ```
 $ mbrelay devices --remote
-HOST     NAME   STATE  ROLE         SESSION  UID
--------  -----  -----  -----------  -------  --------
-torture  gozop  busy   RADIOBRIDGE  s-804    4f02a351
-torture  getez  free   RADIOBRIDGE  -        17449eac
-vali     zavaz  free   RADIOBRIDGE  -        c0a7e11d
+HOST     NAME   STATE  ROLE         FIRMWARE      SESSION  UID
+-------  -----  -----  -----------  ------------  -------  --------
+torture  gozop  busy   RADIOBRIDGE  0.20260913.2  s-804    4f02a351
+torture  getez  free   RADIOBRIDGE  0.20260913.2  -        17449eac
+vali     zavaz  free   RADIOBRIDGE  -             -        c0a7e11d
 
 $ mbrelay devices torture       # one host, named; skips discovery
 ```
+
+`FIRMWARE` is the release the board's relay firmware was built from, as it
+answers `!VER?` (Protocol §3.3) — read when the board is identified and again
+every time a client takes it, so a reflash shows up at the next session. `-`
+means firmware older than 0.20260913.2, which cannot say; reflash it to find out.
 
 That browses the LAN the same way, then reads each host's `GET /devices` on its
 HTTP port (the `registry=` TXT key, else `registry.port`). It never touches the
@@ -223,9 +228,9 @@ uses `dns-sd` instead, so a dev laptop advertises too.
 
 A micro:bit's five-letter name derives a `(channel, group)` all by itself
 (Protocol §3.7), which is how `mbrelay connect tovez` can work with no
-configuration at all. But the mapping has 3125 names and only **25 channels**,
-so 125 names share each one — `togov` and `vevov` both derive channel 37. When
-two robots collide you have to move one, and its name then no longer says where
+configuration at all. But the mapping spreads 3125 names over **73 channels**,
+so about 43 names share each one, and two robots on one channel collide on the
+air. When they do you have to move one, and its name then no longer says where
 it is.
 
 So the derived pair is a **default**, and the registry is what records the
@@ -248,8 +253,8 @@ this are usually not on the relay host — building a robot's config, or running
 a channel survey across the fleet:
 
 ```
-GET    /names            every association, and who shares a link
-GET    /names/<name>     where that robot is; creates the record on a miss
+GET    /names            every association, with conflicts and channel conflicts
+GET    /names/<name>     where that robot is, and who it clashes with; creates on a miss
 PUT    /names/<name>     {"channel": 12, "group": 4}
 DELETE /names/<name>     back to the derived address
 GET    /devices          the boards this host serves, as `mbrelay devices` shows them
@@ -274,9 +279,28 @@ a restart cannot quietly reinstate a stale learned value — and `mbrelay names
 set` refuses to shadow one rather than pretending to succeed. Changing a pin
 needs a daemon restart.
 
-Two robots may end up on one link. The registry **reports** that rather than
-refusing it: a survey is expected to pass through a clash halfway, and an
-operator moving robots by hand needs to see it rather than be stopped by it.
+The registry reports two kinds of clash, at two severities:
+
+| clash | what it means | severity |
+| ----- | ------------- | -------- |
+| **conflict** | two robots on one channel *and* group | **error** — each receives the other's packets and acts on its commands; move one |
+| **channel conflict** | two robots on one channel, different groups | **warning** — the group byte keeps them from hearing each other, but they share one frequency, so their transmissions collide whenever both run |
+
+Two robots whose names derive the same channel are a channel conflict, not a
+conflict: the mapping never gives two names the same pair, so a conflict only
+ever comes from a move. One clash is reported once — robots that share a link are not also
+flagged for sharing its channel, unless a third robot is on that channel in
+another group.
+
+Both show up in `mbrelay names` (a `CONFLICT` column, then one `ERROR` or
+`warning` line per clash), in `GET /names` (`conflicts` and `channel_conflicts`,
+plus `conflict` / `channel_conflict` on each robot's row), as counts in
+`GET /status` and `mbrelay status --json`, and on the row for a single robot, so
+`mbrelay names set` and `mbrelay connect <robot>` print them as they happen.
+
+Neither is **refused**: a survey is expected to pass through a clash halfway,
+an operator moving robots by hand needs to see it rather than be stopped by it,
+and `mbrelay connect` into a clash may be exactly how it gets sorted out.
 
 > **Moving a robot is a two-sided change.** A robot derives its own address from
 > its own name at boot, so it has to be reconfigured to match (the deploy-time
@@ -329,14 +353,24 @@ mbrelay reset <name> --force   # force one board back to factory defaults
 mbrelay disable <name>         # take a board out of the pool
 mbrelay events --follow        # stream daemon events
 mbrelay discover               # relay hosts advertising themselves on the LAN
-mbrelay flash --all-relays     # reflash every board (needs mbdeploy)
+mbrelay flash --all-relays     # reflash every board from the latest release (needs mbdeploy)
 mbrelay config show            # merged config, and where each value came from
 ```
 
-`mbrelay devices` works **without** the daemon running — it falls back to a
-direct USB scan, which is exactly what you want when you are trying to work out
-why the daemon sees nothing. For boards on another machine, use
-`mbrelay devices --remote` or `mbrelay devices <host>`.
+`mbrelay devices` works **without** the daemon running, which is exactly what
+you want when you are trying to work out why the daemon sees nothing. It then
+**asks every board directly**, all at once: its name, role and firmware version
+come from the board itself — relays via `HELLO` and `!VER?`, robots via their own
+`HELLO` (`device NEZHA2 robot tovez …`) and `VER`. Opening a port resets the
+board; `--no-probe` lists USB only. A board that cannot be asked is still named:
+a port another program holds shows `busy` and says which program, and its name
+and role come from mbdeploy's registry, `./config/devices.json`, or any file in
+`[devices] registries` — the line under the table says which. A relay whose
+FIRMWARE reads `<0.20260913.2` answered but predates `!VER?`.
+
+The daemon probes the same way, so a robot plugged into a relay host is named
+(`foreign`, never pooled) instead of written off as `no_firmware`. For boards on
+another machine, use `mbrelay devices --remote` or `mbrelay devices <host>`.
 
 Exit codes are stable, so scripts can branch on them: `0` ok, `1` error, `2`
 usage, `3` daemon not running, `4` device not found, `5` no free device, `6`
@@ -404,6 +438,8 @@ The knobs worth knowing:
 | `registry.port` | `8761` | Where `mbrelay connect <robot>` asks where a robot is. |
 | `[registry.names]` | empty | Pinned assignments, `name = "<channel>/<group>"`. |
 | `state.shutdown_grace_s` | `20` | Must stay below the unit's `TimeoutStopSec`. |
+| `firmware.hex` | empty | Default image for `mbrelay flash`: a path or URL. |
+| `firmware.release_url` | latest release's `MICROBIT.hex` | Used when nothing else names an image. |
 
 ## 8. Reflashing
 
@@ -411,6 +447,27 @@ The knobs worth knowing:
 drives pyOCD over SWD. It takes the board out of the pool, kicks any session,
 runs `mbdeploy probe` (required — mbdeploy resolves targets only against its own
 registry), then deploys and puts the board back.
+
+```bash
+mbrelay flash --all-relays                        # the latest GitHub release
+mbrelay flash getez --url https://…/MICROBIT.hex  # an image from a URL
+mbrelay flash getez --hex ./MICROBIT.hex          # a local build
+```
+
+Where the image comes from, first match wins: `--hex`, `--url`, `firmware.hex`
+(a path or a URL), then `firmware.release_url` — the latest release's
+`MICROBIT.hex`. A download is checked to be Intel HEX before anything is flashed,
+because a wrong GitHub URL answers with a web page rather than an error. For a
+release URL the tag it resolved to is printed (`release: v0.20260913.2`), since
+`releases/latest` itself does not say.
+
+A board takes a minute or more. `flash` names each board before starting it,
+streams mbdeploy's and pyOCD's output as it arrives (progress bars thinned to
+every 10%), and prints how long the board took. Before this it captured
+everything until the end, and a working flash looked exactly like a hung one.
+Under `--json` the progress goes to stderr.
+
+`--all-relays` means every attached micro:bit, relay firmware or not.
 
 The daemon itself has **no runtime dependency** on mbdeploy or pyOCD; a host that
 only serves relays does not need them, and `flash` fails with an install hint.

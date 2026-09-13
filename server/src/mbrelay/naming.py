@@ -1,27 +1,25 @@
 """A micro:bit's name gives its DEFAULT radio address.
 
 The five-letter CODAL friendly name is a base-5 encoding of the chip's
-``NRF_FICR->DEVICEID[1]``, so a board derives its own ``(channel, group)`` at
-boot and any tool that knows the name derives the same pair, with no
-coordination at all.
+``NRF_FICR->DEVICEID[1] % 3125``, so a board derives its own
+``(channel, group)`` at boot and any tool that knows the name derives the same
+pair, with no coordination at all.
 
-That is a default, not an address. 3125 names share 25 channels, so 125 names
-land on each one; when two robots collide, one has to move, and its name then
-no longer says where it is. ``registry.py`` is what records the exceptions, and
-this module is what it calls to compute the default in the first place. Nothing
-here knows about overrides -- keeping the mapping pure is what lets its digest
-stay a cross-repo contract.
+That is a default, not an address. The 3125 names spread over 73 channels, so
+about 43 names share each one; when two robots collide, one has to move, and
+its name then no longer says where it is. ``registry.py`` is what records the
+exceptions, and this module is what it calls to compute the default in the
+first place. Nothing here knows about overrides -- keeping the mapping pure is
+what lets its digest stay a cross-repo contract.
 
-Normative spec: ``docs/radio-addressing.md`` in pxt-nezha-diffdrive, with the
-machine-readable contract ``docs/radio-address-vectors.json``. This repo mirrors
-that file at ``server/tests/radio-address-vectors.json`` and asserts the whole
-3125-name space against its published sha256 -- never a copied table.
+Normative spec: ``docs/design/radio-addressing.md`` in radio-robot-lib (its
+wiki's "Radio addressing" page). ``server/tests/radio-address-vectors.json``
+transcribes its digests and vectors, and the tests assert the whole 3125-name
+space against the published sha256 -- never a copied table.
 
-The relay firmware does NOT implement the mapping. It used to, for a ``!N
-<name>`` command that was removed along with it: the board cannot see the
-registry, so tuning by name on the board would mistune exactly the robots that
-were moved off their default. The robot's own firmware still implements it, to
-self-address at boot.
+The relay firmware implements the same map in ``source/relay/naming.h`` for
+``!N <name>``. The board cannot see the registry, so ``!N`` always tunes to the
+name's DEFAULT; `mbrelay connect <robot>` asks the registry and sends ``!CG``.
 
 The map, verbatim from the spec::
 
@@ -29,14 +27,16 @@ The map, verbatim from the spec::
     positions 1, 3      vowel       u o i e a   = 0 1 2 3 4
 
     n       = base5(name)          # name[0] is the MOST significant digit
-    channel = 25 + 2 * (n % 25)    # 25, 27, ... 73
-    group   = 1 + n // 25          # then skip 10 -> 1..9, 11..126
+    channel = 11 + (n % 73)        # 11 .. 83
+    group   = 15 + (n % 241)       # 15 .. 255
 
-Every intermediate is 0..3124, so MakeCode int32, C++ ``int`` and Python agree.
-Never emitted: channels 3, 4, 7 (the legacy fleet and MakeCode's default) and
-groups 0, 10 -- group 10 is the relay's ``!C``/button space, so a hand-dialled
-relay can never land on a derived link. A registry override is under no such
-constraint: it may use anything ``!CG`` accepts.
+73 and 241 are coprime and 3125 < 73 * 241, so every name gets its own pair
+(Chinese remainder theorem); a channel is shared, a pair never is. Every
+intermediate is at most 100,048, so MakeCode int32, C++ ``int`` and Python
+agree. Never emitted: channels 0-10 (the legacy fleet's 3/4/5 and MakeCode's
+default 7) and groups 0-14 (MakeCode's 0 and the relay's ``!C``/button group
+10), so a hand-dialled relay can never land on a derived link. A registry
+override is under no such constraint: it may use anything ``!CG`` accepts.
 """
 
 from __future__ import annotations
@@ -49,9 +49,9 @@ NAME_LEN = 5
 NAME_RE = re.compile(r"^[zvgpt][uoiea][zvgpt][uoiea][zvgpt]$")
 SPACE = 5 ** NAME_LEN       #: 3125 names, 3125 distinct pairs
 
-CHANNEL_MIN, CHANNEL_MAX, CHANNEL_STEP, CHANNELS = 25, 73, 2, 25
-GROUP_MIN, GROUP_MAX = 1, 126
-RESERVED_GROUP = 10         #: the !C / button-A/B group; skipped, never emitted
+CHANNEL_MIN, CHANNEL_MAX, CHANNELS = 11, 83, 73
+GROUP_MIN, GROUP_MAX, GROUPS = 15, 255, 241
+CHANNELS_INVERSE = 208      #: 73 * 208 = 1 (mod 241), for the reverse map
 
 _ASCII_WS = " \t\r\n\f\v"
 
@@ -71,7 +71,7 @@ def validate(name: str) -> str:
     """Normalize, then require a well-formed micro:bit name.
 
     Raises ``ValueError`` for anything the firmware answers with
-    ``not a micro:bit name``. Unknown is fine, malformed is not: ``pipip`` is a
+    ``usage !N <name>``. Unknown is fine, malformed is not: ``pipip`` is a
     legal address nobody is on, while ``robot1`` has none at all.
     """
     n = normalize(name)
@@ -102,11 +102,7 @@ def encode(n: int) -> str:
 
 def address(n: int) -> tuple[int, int]:
     """n -> (channel, group)."""
-    channel = CHANNEL_MIN + CHANNEL_STEP * (n % CHANNELS)
-    group = 1 + n // CHANNELS
-    if group >= RESERVED_GROUP:
-        group += 1
-    return channel, group
+    return CHANNEL_MIN + n % CHANNELS, GROUP_MIN + n % GROUPS
 
 
 def name_to_radio(name: str) -> tuple[int, int]:
@@ -117,30 +113,34 @@ def name_to_radio(name: str) -> tuple[int, int]:
 
 def radio_to_name(channel: int, group: int) -> str:
     """The one name that derives ``(channel, group)``, or ``ValueError`` when
-    the pair is outside the derived space (a ``!C``/``!CG`` link, say)."""
-    if channel % 2 == 0 or not CHANNEL_MIN <= channel <= CHANNEL_MAX:
+    no name does. Only 3125 of the 17,593 in-range pairs belong to a name, so
+    most pairs -- and every ``!C`` link -- have none."""
+    if not CHANNEL_MIN <= channel <= CHANNEL_MAX:
         raise ValueError(f"channel {channel} is not a derived address")
-    if group == RESERVED_GROUP or not GROUP_MIN <= group <= GROUP_MAX:
+    if not GROUP_MIN <= group <= GROUP_MAX:
         raise ValueError(f"group {group} is not a derived address")
-    g = group - 1 if group > RESERVED_GROUP else group
-    return encode(CHANNELS * (g - 1) + (channel - CHANNEL_MIN) // CHANNEL_STEP)
+    c, g = channel - CHANNEL_MIN, group - GROUP_MIN
+    # The n < 73 * 241 with n = c (mod 73) and n = g (mod 241).
+    n = c + CHANNELS * (((g - c + GROUPS) * CHANNELS_INVERSE) % GROUPS)
+    if n >= SPACE:
+        raise ValueError(f"{channel}/{group} belongs to no name")
+    return encode(n)
 
 
 def canonical_form(version: int = 2) -> str:
     """The spec's canonical full-space form, one line per name for n = 0..3124
-    in order. Its sha256 is the three-repo contract.
+    in order. Its sha256 is the cross-repo contract.
 
-    version 2 (the conformance gate, ``$.properties.conformance_sha256``):
+    version 2 (the conformance gate, D2):
     ``<name>,<channel>,<group>,<decode(name)>,<reverse(channel,group)>`` --
     the last two columns are always n, which is the point: every line forces
-    the decoder (what a registry lookup actually runs) and the reverse map to
-    execute and hashes their output. A little-endian decoder is wrong on 96%
-    of names and passes version 1 unchanged; against version 2 it yields the
-    spec's published broken-decode digest and fails loudly.
+    the decoder (what ``!N`` and a registry lookup actually run) and the
+    reverse map to execute and hashes their output. A little-endian decoder
+    passes version 1 unchanged; against version 2 it yields the spec's
+    published broken-decode digest and fails loudly.
 
-    version 1 (``$.properties.full_space_sha256``): the first three columns
-    only. Kept as a bisector -- version 2 failing while 1 passes localises the
-    fault to decode/reverse.
+    version 1 (D1): the first three columns only. Kept as a bisector --
+    version 2 failing while 1 passes localises the fault to decode/reverse.
     """
     if version not in (1, 2):
         raise ValueError(f"unknown canonical form version {version}")

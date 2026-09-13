@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field, replace
 
+from mbrelay import naming
+
 
 @dataclass
 class StoredConfig:
@@ -24,6 +26,7 @@ class StoredConfig:
     mode: str = "RAW250"
     frag: str = "OFF"
     echo: str = "OFF"
+    name: str = ""          # set by !N <name>; cleared once a number picks the link
 
 
 DEFAULTS = StoredConfig()
@@ -34,14 +37,18 @@ class FakeRelayFirmware:
 
     def __init__(self, name: str = "getez", serial: str = "1779042496",
                  role: str = "RADIOBRIDGE", *, drop_first_banners: int = 0,
-                 stored: StoredConfig | None = None) -> None:
+                 stored: StoredConfig | None = None,
+                 version: str | None = "0.20260913.2") -> None:
         self.name, self.serial, self.role = name, serial, role
+        # None models firmware older than !VER?, which refuses it as unknown.
+        self.version = version
         # Survives reset(), just like the real board's flash. Tests that want a
         # dirty board hand one in here.
         self.flash: StoredConfig | None = stored
         self.cfg = replace(self.flash) if self.flash else replace(DEFAULTS)
         self._stored_channel = self.cfg.channel
         self._stored_group = self.cfg.group
+        self._stored_name = self.cfg.name
         self.plane = "command"
         self.out = bytearray()
         self._line = bytearray()
@@ -61,6 +68,7 @@ class FakeRelayFirmware:
         self.cfg = replace(self.flash) if self.flash else replace(DEFAULTS)
         self._stored_channel = self.cfg.channel
         self._stored_group = self.cfg.group
+        self._stored_name = self.cfg.name
         self.plane = "command"
         self._line.clear()
         self.out.clear()
@@ -79,14 +87,16 @@ class FakeRelayFirmware:
 
     def _print_config(self, *, include_caps: bool = False) -> None:
         c = self.cfg
-        caps = " caps: CGT" if include_caps else ""
+        name = f" name: {c.name}" if c.name else ""
+        caps = " caps: CGT N" if include_caps else ""
         self._comment(f"channel: {c.channel} group: {c.group} "
-                      f"mode: {c.mode} power: {c.power}{caps}")
+                      f"mode: {c.mode} power: {c.power}{name}{caps}")
 
     def _save(self) -> None:
         self.flash = replace(self.cfg)
         self.flash.channel = self._stored_channel
         self.flash.group = self._stored_group
+        self.flash.name = self._stored_name
 
     # -- input -------------------------------------------------------------
     def feed(self, data: bytes) -> None:
@@ -112,6 +122,8 @@ class FakeRelayFirmware:
             self._print_config(include_caps=True)
         elif line == b"!MODE?":
             self._comment(f"mode: {c.mode}")
+        elif line == b"!VER?" and self.version is not None:
+            self._comment(f"version: {self.version}")
         elif line in (b"!MODE RAW250", b"!MODE RAW251"):
             c.mode = "RAW250"; self._save(); self._comment("mode: RAW250")
         elif line == b"!MODE MAKECODE":
@@ -139,8 +151,9 @@ class FakeRelayFirmware:
                 self._comment("error: usage !C <ch 0-35>"); return
             if not 0 <= channel <= 35:
                 self._comment("error: usage !C <ch 0-35>"); return
-            c.channel, c.group = channel, 10       # !C forces group 10
+            c.channel, c.group, c.name = channel, 10, ""   # !C forces group 10
             self._stored_channel, self._stored_group = c.channel, c.group
+            self._stored_name = ""
             self._save()
             self._print_config()                   # !C calls printConfig()
         elif line.startswith((b"!CG ", b"!RC ")):
@@ -153,8 +166,21 @@ class FakeRelayFirmware:
             # board's own refusal rather than as a silent mistune.
             if not (0 <= channel <= 83 and 0 <= group <= 255):
                 self._comment("error: usage !CG <ch 0-83> <group 0-255>"); return
-            c.channel, c.group = channel, group
+            c.channel, c.group, c.name = channel, group, ""
             self._stored_channel, self._stored_group = c.channel, c.group
+            self._stored_name = ""
+            self._save(); self._print_config()
+        elif line == b"!N?":
+            self._comment(f"name: {c.name or '-'}")
+        elif line.startswith(b"!N "):
+            try:
+                name = naming.validate(line[3:].decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                self._comment("error: usage !N <name>"); return
+            c.channel, c.group = naming.name_to_radio(name)
+            c.name = name
+            self._stored_channel, self._stored_group = c.channel, c.group
+            self._stored_name = name
             self._save(); self._print_config()
         elif line.startswith(b"!CGT "):
             parts = line.split()
@@ -166,7 +192,7 @@ class FakeRelayFirmware:
                 self._comment("error: usage !CGT <ch 0-83> <group 0-255>"); return
             if not (0 <= channel <= 83 and 0 <= group <= 255):
                 self._comment("error: usage !CGT <ch 0-83> <group 0-255>"); return
-            c.channel, c.group = channel, group
+            c.channel, c.group, c.name = channel, group, ""   # flash keeps its name
             self._print_config()
         elif line.startswith(b"!P "):
             try:
@@ -188,12 +214,36 @@ class FakeRelayFirmware:
             self._comment("!C <ch>            set channel")
             self._comment("!CG <ch> <group>   set channel and group")
             self._comment("!CGT <ch> <group>  transient tune; do not save to flash")
+            self._comment("!N <name>          set channel+group from a micro:bit name")
         else:
             self._comment("error: unknown command (try !HELP)")
 
     def drain(self) -> bytes:
         data, self.out = bytes(self.out), bytearray()
         return data
+
+
+class FakeRobotFirmware(FakeRelayFirmware):
+    """A robot, which speaks its own dialect (pxt-nezha-diffdrive wire_handler.cpp):
+    ``HELLO`` -> ``device NEZHA2 robot <name> <serial>``, ``VER`` -> ``ver <v>``.
+    It has no relay command plane at all."""
+
+    def __init__(self, name: str = "tovez", serial: str = "2314287040",
+                 robot_version: str = "1.20260912.8", **kwargs) -> None:
+        super().__init__(name=name, serial=serial, role="NEZHA2", **kwargs)
+        self.robot_version = robot_version
+
+    def _emit_banner(self) -> None:
+        self.out += f"device {self.role} robot {self.name} {self.serial}\n".encode()
+
+    def _handle(self, line: bytes) -> None:
+        self.commands.append(line)
+        if line == b"HELLO":
+            self._emit_banner()
+        elif line == b"VER":
+            self.out += f"ver {self.robot_version}\n".encode()
+        else:
+            self.out += b"nack unknown verb\n"
 
 
 class FakeChannel:
