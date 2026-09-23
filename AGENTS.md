@@ -15,8 +15,8 @@ When you learn something a future agent will need, edit or add a page in the wik
 - `docs/wiki/_subsystem.yml` (the ONLY file here) holds this subsystem's metadata
   (name / title / blurb). Changes to it auto-ping the hub.
 - Add an `updated:` date to a page's front matter when you change it.
-- After editing wiki pages, manually trigger a rebuild from the hub's Actions tab:
-  <https://github.com/League-Robotics/League-Robotics.github.io/actions>
+- Edit and push the wiki, and stop there. The hub picks up wiki changes by itself —
+  do not trigger or touch its rebuild.
 
 ## How to understand what to do
 
